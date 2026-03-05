@@ -5,8 +5,6 @@ from sentiment import calculate_sentiment
 def numberic_push_count(push_count):
     if push_count=="爆":
         return 100
-    elif push_count=="XX":
-        return -100
     elif push_count.startswith("X"):
         return int(push_count.strip("X"))*-10
     else:
@@ -17,7 +15,6 @@ cursor=conn.cursor()
 df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
 pd.set_option('display.max_colwidth', None)
 df['Scraped_time']=pd.to_datetime(df['Scraped_time'])
-
 #新建一個欄位：分析url，抓出『M.』後面的數字(單位當成秒)，並轉換為datetime
 df['Published_Time']=df['Url'].apply(lambda url:pd.to_datetime(int(re.search(r'M\.(\d+)\.',url).group(1)),unit="s"))+pd.Timedelta(hours=8)
 
