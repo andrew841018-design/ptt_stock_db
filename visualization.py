@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 import matplotlib.dates as mdates
 import datetime
+import re
 from data_cleanner import clean_all
 def set_x_axis_format(plt):
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
@@ -20,13 +21,15 @@ df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
 df=clean_all(df,'ptt_stock_article_info')
 #format
 current_year=datetime.datetime.now().year
-df['Date']=pd.to_datetime(str(current_year)+'/'+df['Date'],format='%Y/%m/%d')
+df['Published_Time']=df['Url'].apply(lambda url:pd.to_datetime(int(re.search(r'M\.(\d+)\.',url).group(1)),unit="s"))+pd.Timedelta(hours=8)
+df['Date']=df['Published_Time'].dt.date
+
 daily_sentiment=df.groupby('Date')['Article_Sentiment_Score'].mean()
 print(f"資料期間:{df['Date'].min()} ~ {df['Date'].max()}")
 
 #sentiment trend=>越高，表示文章的平均情緒越正面
 plt.figure()
-set_x_axis_format(plt)
+plt.gcf().autofmt_xdate()
 plt.plot(daily_sentiment.index,daily_sentiment.values)
 plt.title('Ptt Stock Daily Sentiment Trend')
 plt.xlabel('Date')
@@ -46,7 +49,7 @@ plt.savefig('push_count_vs_sentiment_score.png')
 
 #group by date and count the number of articles
 plt.figure()
-set_x_axis_format(plt)
+plt.gcf().autofmt_xdate()
 daily_count=df.groupby('Date').size()
 plt.bar(daily_count.index,daily_count.values)
 plt.xlabel('Date')
