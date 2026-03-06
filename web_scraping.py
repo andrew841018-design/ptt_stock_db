@@ -128,8 +128,7 @@ cursor.execute("PRAGMA foreign_keys = ON")
 ## delte content before insert
 ## note that need to delete comment_info first because of the foreign key constraint
 conn.commit()
-
-for i in range(50):#爬蟲頁數
+for i in range(900):#爬蟲頁數
     retry = 0
     while retry < MAX_RETRY:
         try:
