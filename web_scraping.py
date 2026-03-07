@@ -3,12 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import logging
-from datetime import datetime
 import sqlite3
-logging.basicConfig(level=logging.INFO,format="%(asctime)s - %(levelname)s - %(message)s")
-## global variable
-MAX_RETRY=5
-
+from datetime import datetime
 # functions
 def get_previous_page(soup):
     for item in soup:
@@ -19,7 +15,9 @@ def get_previous_page(soup):
             prev_page=prev_soup.get("href")
             return prev_page
     return False
-def scrape_web_page_title(headers):
+def scrape_web_page_title(headers,url):
+    conn=sqlite3.connect('ptt_stock.db')
+    cursor=conn.cursor()
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
@@ -44,7 +42,6 @@ def scrape_web_page_title(headers):
             cursor.execute("SELECT Article_id FROM ptt_stock_article_info WHERE Url=?",(article_url,))
             article_id_exist=cursor.fetchone()
             if article_id_exist:#有查到，表示已存在
-                logging.info(f"已存在 Article_id: {article_id_exist[0]} already exists")
                 continue
             web_page_content=scrape_web_page_content(headers,article_url)
             if not web_page_content:
@@ -118,45 +115,3 @@ def scrape_web_page_content(headers,url):
         return {"Content":article_content,"Comment_info":comment_info}
     else:
         return False
-
-#init    
-url = "https://www.ptt.cc/bbs/stock/index.html" #初始url
-conn=sqlite3.connect("ptt_stock.db")
-cursor=conn.cursor()
-cursor.execute("PRAGMA foreign_keys = ON")
-
-## delte content before insert
-## note that need to delete comment_info first because of the foreign key constraint
-conn.commit()
-for i in range(900):#爬蟲頁數
-    retry = 0
-    while retry < MAX_RETRY:
-        try:
-            headers = {"cookie": "over18=1"}
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            logging.info(f"第{i+1}頁")
-            if not scrape_web_page_title(headers):
-                print("Error: scrape_web_page_title")
-                break
-            time.sleep(0.5)#delay for 0.5 seconds
-            page_soup=soup.find_all("div",class_="btn-group btn-group-paging")
-            prev_url=get_previous_page(page_soup)
-            if prev_url:
-                url="https://www.ptt.cc"+prev_url
-            else:
-                logging.info("沒有上一頁")
-                break
-            break;#成功後跳出retry
-        except requests.exceptions.Timeout:
-            logging.error("請求超時，請稍後再試")
-        except requests.exceptions.HTTPError as e:
-            logging.error(f"HTTP Error: {e}")
-        except requests.exceptions.ConnectionError as e:
-            logging.error(f"Connection Error: {e}")
-        except Exception as e:
-            logging.error(f"Error: {e}")
-        retry += 1
-logging.info("爬蟲完成")
-conn.close()
