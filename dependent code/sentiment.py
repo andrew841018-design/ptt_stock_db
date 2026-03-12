@@ -1,6 +1,4 @@
 import jieba
-import pandas as pd
-import sqlite3
 import re
 from ptt_sentiment_dict import POSITIVE_WORDS,NEGATIVE_WORDS
 jieba.load_userdict("user_dict.txt")#載入自定義規則（用詞，詞頻，詞性）
