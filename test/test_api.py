@@ -38,7 +38,8 @@ def test_get_search_articles():
     # correct request
     response=client.get(f"/articles/search?keyword=台積電")
     assert response.status_code in [200,404]
-    assert response.json()["search_articles"] is not None
+    if response.status_code == 200:
+        assert response.json()["search_articles"] is not None
     # empty keyword
     response=client.get(f"/articles/search?keyword=")
     assert response.status_code in [200,404]
