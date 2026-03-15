@@ -1,0 +1,16 @@
+ERROR:    Error loading ASGI app. Could not import module "api".
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://0.0.0.0:8501
+
+  For better performance, install the Watchdog module:
+
+  $ xcode-select --install
+  $ pip install watchdog
+            
+Building prefix dict from the default dictionary ...
+Loading model from cache /var/folders/zs/_9d29q052tv7_3x1q514_p540000gn/T/jieba.cache
+Loading model cost 0.580 seconds.
+Prefix dict has been built successfully.
+  0%|          | 0/13239 [00:00<?, ?it/s]100%|██████████| 13239/13239 [00:00<00:00, 638022.69it/s]

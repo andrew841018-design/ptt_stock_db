@@ -2,6 +2,7 @@ from fastapi import FastAPI,Query
 import sqlite3
 import pandas as pd
 import datetime
+import os
 from typing import Literal
 from fastapi import HTTPException
 app=FastAPI()
@@ -11,10 +12,10 @@ ARTICLE_LIMIT_MIN=1
 ARTICLE_LIMIT_MAX=100
 ARTICLE_PERIOD_MIN=1
 ARTICLE_PERIOD_MAX=365
-#TODO:
 
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'dependent_code', 'ptt_stock.db')
 def get_db_connection():
-    return sqlite3.connect('ptt_stock.db')
+    return sqlite3.connect(DB_PATH)
 @app.get("/sentiments/today")#名稱可自由設計
 def get_today_sentiment():
     conn=None
@@ -44,6 +45,8 @@ def get_change_sentiment():
     finally:
         if conn:
             conn.close()
+    if len(df)==0:
+        raise HTTPException(status_code=404,detail={"message":"No data"})
     df['Published_Time']=pd.to_datetime(df['Published_Time'])
     df['Published_Date']=df['Published_Time'].dt.date
     today=df[df['Published_Date']==df['Published_Date'].max()]
