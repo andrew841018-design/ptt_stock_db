@@ -16,7 +16,9 @@ def create_table():
         Url TEXT UNIQUE,
         Date TEXT,
         Content TEXT,
-        Scraped_time TEXT
+        Scraped_time TEXT,
+        Article_Sentiment_Score REAL,
+        Published_Time TEXT
     )
     """)
     cursor.execute("""
@@ -26,6 +28,7 @@ def create_table():
         User_id TEXT,
         Push_tag TEXT,
         Message TEXT,
+        Comment_Sentiment_Score REAL,
         FOREIGN KEY (Article_id) REFERENCES ptt_stock_article_info(Article_id)
     )
     """)

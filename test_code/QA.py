@@ -1,6 +1,9 @@
 import sqlite3
+import os
 import pandas as pd
-conn = sqlite3.connect("ptt_stock.db")
+
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'dependent_code', 'ptt_stock.db')
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 # 檢查重複 URL
