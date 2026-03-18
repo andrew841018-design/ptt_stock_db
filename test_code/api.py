@@ -16,17 +16,19 @@ ARTICLE_PERIOD_MAX=365
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'dependent_code', 'ptt_stock.db')
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
-@app.get("/sentiments/today")#名稱可自由設計
-def get_today_sentiment():
-    conn=None
+def load_articles_df() -> pd.DataFrame:#return the dataframe of the articles
+    conn = None
     try:
-        conn=get_db_connection()
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
+        conn = get_db_connection()
+        return pd.read_sql_query("SELECT * FROM ptt_stock_article_info", conn)
     except Exception as e:
-        raise HTTPException(status_code=500,detail={"message":"database search failed: "+str(e)})
+        raise HTTPException(status_code=500, detail={"message": "database search failed: " + str(e)})
     finally:
         if conn:
             conn.close()
+@app.get("/sentiments/today")#名稱可自由設計
+def get_today_sentiment():
+    df=load_articles_df()
     df['Published_Time']=pd.to_datetime(df['Published_Time'])
     df['Published_Date']=df['Published_Time'].dt.date
     today=df[df['Published_Date']==df['Published_Date'].max()]
@@ -36,15 +38,7 @@ def get_today_sentiment():
     return {"date":str(today['Published_Date'].max()),"sentiment_score":sentiment_score,"message":"Success"}
 @app.get("/sentiments/change")
 def get_change_sentiment():
-    conn=None
-    try:
-        conn=get_db_connection()
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
-    except Exception as e:
-        raise HTTPException(status_code=500,detail={"message":"database search failed: "+str(e)})
-    finally:
-        if conn:
-            conn.close()
+    df=load_articles_df()
     if len(df)==0:
         raise HTTPException(status_code=404,detail={"message":"No data"})
     df['Published_Time']=pd.to_datetime(df['Published_Time'])
@@ -57,15 +51,7 @@ def get_change_sentiment():
     return {"change_sentiment_score":change_score,"message":"Success"}
 @app.get("/sentiments/recent")
 def get_recent_sentiment_score(period:int=Query(default=10,ge=PERIOD_MIN,le=PERIOD_MAX)):
-    conn=None
-    try:
-        conn=get_db_connection()
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
-    except Exception as e:
-        raise HTTPException(status_code=500,detail={"message":"database search failed: "+str(e)})
-    finally:
-        if conn:
-            conn.close()
+    df=load_articles_df()
     if len(df)==0:
         raise HTTPException(status_code=404,detail={"message":"No data"})
     df['Published_Time']=pd.to_datetime(df['Published_Time'])
@@ -81,15 +67,7 @@ def get_top_push_articles(
     period:int=Query(default=7,ge=ARTICLE_PERIOD_MIN,lt=ARTICLE_PERIOD_MAX+1),#days
     period_type:Literal["day","week","month","year"]=Query(default="day"),#day,week,month,year
     ):
-    conn=None
-    try:
-        conn=get_db_connection()
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
-    except Exception as e:
-        raise HTTPException(status_code=500,detail={"message":"database search failed: "+str(e)})
-    finally:
-        if conn:
-            conn.close()
+    df=load_articles_df()
     if len(df)==0:
         raise HTTPException(status_code=404,detail={"message":"No data"})
     df['Published_Time']=pd.to_datetime(df['Published_Time'])
@@ -112,15 +90,7 @@ def get_top_push_articles(
 @app.get("/articles/search")
 #...表示必填，使用者不填入內容會出錯
 def search_articles(keyword:str):
-    conn=None
-    try:
-        conn=get_db_connection()
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
-    except Exception as e:
-        raise HTTPException(status_code=500,detail={"message":"database search failed: "+str(e)})
-    finally:
-        if conn:
-            conn.close()
+    df=load_articles_df()
     if len(df)==0:
         raise HTTPException(status_code=404,detail={"message":"No data found"})
     #case=False-表示不區分大小寫，na=False-表示不處理缺失值
