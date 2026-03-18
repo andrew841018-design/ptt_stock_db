@@ -5,17 +5,16 @@ import jieba
 from collections import Counter
 import datetime
 from data_cleanner import clean_all
-import re
+from tqdm import tqdm
+from config import TABLE_ARTICLE, DB_PATH
+from db_helper import get_db
 from plt_function import plot_sentiment_trend, plot_push_count_distribution, plot_daily_article_count
 @st.cache_data
 def load_data():
-    with sqlite3.connect('ptt_stock.db') as conn:
-        df=pd.read_sql_query("SELECT * FROM ptt_stock_article_info",conn)
-    df=clean_all(df,'ptt_stock_article_info')
-
-    #format
-    df['Published_Time']=df['Url'].apply(lambda url:pd.to_datetime(int(re.search(r'M\.(\d+)\.',url).group(1)),unit="s"))+pd.Timedelta(hours=8)
-    df['Date']=df['Published_Time'].dt.date
+    tqdm.pandas()
+    with get_db() as conn:
+        df=pd.read_sql_query(f"SELECT * FROM {TABLE_ARTICLE}",conn)
+    df=clean_all(df,TABLE_ARTICLE)
     return df
 st.set_page_config(page_title="Ptt Stock Sentiment Analysis", page_icon=":chart_with_upwards_trend:", layout="wide")
 st.title("Ptt Stock Sentiment Analysis")
@@ -49,8 +48,8 @@ st.pyplot(fig_daily_article_count)
 today=df[df['Date']==df['Date'].max()]
 score=round(today['Article_Sentiment_Score'].mean(),2)
 yesterday=df[df['Date']==df['Date'].max()-datetime.timedelta(days=1)]
-chage_score=round(score-yesterday['Article_Sentiment_Score'].mean(),2)
-st.metric(label="Today's Sentiment Score", value=score, delta=chage_score)
+change_score=round(score-yesterday['Article_Sentiment_Score'].mean(),2)
+st.metric(label="Today's Sentiment Score", value=score, delta=change_score)
 
 st.subheader("Today's Top 10 Trending Articles")#顯示今日前10名熱門文章
 top_10_articles=st.dataframe(df.nlargest(10, 'Push_count')[['Title','Push_count','Article_Sentiment_Score','Date']])
