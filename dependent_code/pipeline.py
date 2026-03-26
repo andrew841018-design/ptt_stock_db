@@ -46,6 +46,7 @@ def analysis():
 
 if __name__=="__main__":
     url = "https://www.ptt.cc/bbs/stock/index.html" #初始url
+    tqdm.pandas()
     for i in tqdm(range(900),desc="爬蟲頁數"):#爬蟲頁數
         headers = {"cookie": "over18=1"}
         retry = 0

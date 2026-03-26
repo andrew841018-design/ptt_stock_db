@@ -1,9 +1,13 @@
 import boto3
 from datetime import datetime
+import os
+try:
+    from dependent_code.config import DB_PATH
+except ImportError:
+    from config import DB_PATH
 
 s3 = boto3.client('s3')
-BACKET ='ptt-sentiment-backup'
-DB_PATH = 'ptt_sentiment.db'
+BACKET = 'ptt-sentiment-backup'
 def backup_database():
     timestamp = datetime.now().strftime("%Y%m%d%H%M")
     s3_key = f'backup_{timestamp}.db'
