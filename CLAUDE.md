@@ -290,17 +290,115 @@ project/
 
 | 項目 | 說明 |
 |------|------|
-| （進行中） | — |
+| Schema 設計深度理解 | sources 正規化理由、sentiment_scores Polymorphic Association 設計決策 |
+| psycopg2-binary 安裝 | psycopg2 需編譯，開發環境改用 psycopg2-binary |
+| schema.py 清理 | 移除 getLogger、改用 logging.info()、移除未使用的 `from psycopg2 import sql` |
+| Logging 概念 | basicConfig vs getLogger 分工，詳見 project_notes.md 九、Logging |
 
 #### 學到的概念
 
-（待補）
+- `sources` 獨立成表：避免 source 屬性（url、name）在每篇文章重複存，改一次不用改萬筆
+- Polymorphic Association：`target_type + target_id` 讓 sentiment_scores 同時支援文章/留言，新增目標類型不用改 schema
+- `logging.basicConfig` 是全域設定（格式、等級）；`logging.info()` 直接用就好，`getLogger` 在單一模組專案用不到
+- `psycopg2` 需要本機 PostgreSQL 開發工具才能編譯，開發環境直接裝 `psycopg2-binary`
 
 #### 下次繼續
 
 - [ ] 遷移腳本：SQLite → PostgreSQL（Push_count TEXT→INTEGER，時間 TEXT→TIMESTAMP）
 - [ ] 改用 psycopg2 連線 PostgreSQL
 - [ ] `analysis.py` 的 `Column already exist` ERROR 改為 WARNING 或加 IF NOT EXISTS 判斷
+- [ ] Phase 2 NEW：PII masking（author hash 化）
+- [ ] Phase 3 NEW：JWT Authentication
+
+---
+
+### 2026-03-29
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| QA.py 重構 | 原本只有 `__main__`，改為包成 `QA_checks()` 函式，支援獨立執行與被 import 兩種情境 |
+| QA.py 加 assert | 3 個 assert 取代 if/warning：無重複 URL、無孤兒推文、articles 不為空 |
+| pipeline.py 整合 QA | `from QA import QA_checks`，`analysis()` 後呼叫，QA 邏輯不重複寫進 pipeline |
+| require_lib.txt 改名 | 改為標準 `requirements.txt`，配合 `pip install -r` 慣例 |
+| python-dotenv 安裝修復 | launchd 排程跑 pipeline 時 ModuleNotFoundError，安裝至 conda env 解決 |
+
+#### 學到的概念
+
+- `HAVING` vs `WHERE`：`WHERE` 分組前過濾原始資料；`HAVING` 分組後過濾聚合結果（`COUNT`、`SUM` 等）
+- Data Engineering QA ≠ 手動測試，而是 pipeline 裡的自動化檢查點（重複資料、FK 完整性、資料量）
+- `assert` 是關鍵字不是函式，不需要括號：`assert 條件, "訊息"`
+- `assert(條件, "訊息")` 的陷阱 — 括號使整體變成 tuple，永遠是 truthy，assert 永遠不會 fail
+- `fetchone()` 回傳單個 tuple（一列），用 `[0]` 取第一個欄位值
+- `fetchall()` 回傳 list of tuples（全部列），空結果是 `[]`
+- `ModuleNotFoundError` = 該套件未裝在「執行當下」的 Python 環境，conda env 需逐一安裝
+
+#### 下次繼續
+
+- [ ] 遷移腳本：SQLite → PostgreSQL（Push_count TEXT→INTEGER，時間 TEXT→TIMESTAMP）
+- [ ] 改用 psycopg2 連線 PostgreSQL
+- [ ] `analysis.py` 的 `Column already exist` ERROR 改為 WARNING 或加 IF NOT EXISTS 判斷
+- [ ] Phase 2 NEW：PII masking（author hash 化）
+- [ ] Phase 3 NEW：JWT Authentication
+
+---
+
+### 2026-03-29（下午）
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| 全專案 code review | 找出 20 個問題，最高優先：`score_target` → `target_type` 欄位名錯誤（analysis/visualization/api 全部受影響）|
+| `ptt_sentiment_dict.py` 合併 | 字典內容移入 `sentiment.py`，刪除原檔，少一個 import |
+| `_get_or_create_source` 加 type hint | `-> int` + docstring，讓回傳值一目瞭然 |
+| requirements.txt 補齊 | 補上 `psycopg2-binary`、`great_expectations==0.18.19` |
+
+#### 學到的概念
+
+- `SERIAL PRIMARY KEY` = PostgreSQL 自動遞增，INSERT 不用填該欄位
+- `RETURNING` = INSERT 後直接回傳指定欄位值，不用再查一次
+- `_` 前綴 = 只在本檔案內用的 helper，不對外開放
+- `-> int` type hint = 讓 IDE 直接顯示回傳型別，不用看函式內容
+- `re.search(r'M\.(\d+)\.', url)` = regex 找 PTT URL 裡的 Unix timestamp
+- `group(0)` = 整個 match；`group(1)` = 第一個括號內容
+- `datetime.fromtimestamp()` = Unix timestamp → Python datetime
+- `item.decompose()` = BeautifulSoup 把元素從 DOM 移除並銷毀（vs `extract()` 移除但保留）
+- Python 檔案無法在不改 import 路徑的前提下移進子資料夾，根本原因是 import 依賴當前目錄
+- `str(e)` vs `raise`：`str(e)` 只取訊息文字繼續跑；`raise` 往上拋中止執行
+- Exception 傳遞方向：底層 raise → 中層 except+處理+raise → 最上層 except+logging 收尾
+
+#### 下次繼續
+
+- [ ] 修復 `score_target` → `target_type`（analysis.py、visualization.py、api.py）
+- [ ] QA.py、ge_validation.py 連線改用 context manager
+- [ ] 遷移腳本：SQLite → PostgreSQL
+- [ ] Phase 2 NEW：PII masking（author hash 化）
+- [ ] Phase 3 NEW：JWT Authentication
+
+---
+
+### 2026-03-29（晚）
+
+#### 學到的概念
+
+- `st.dataframe()` 回傳 `None`，賦值給變數毫無意義，直接呼叫才是正確寫法
+- `finally` + `os.path.exists()` 組合：`pg_dump` 失敗時暫存檔不一定存在，先檢查再刪才不會 FileNotFoundError
+- 不能把清理移到 `try` 裡：失敗時不會執行到，暫存檔殘留
+- Linux 三個預設 file descriptor：`0`=stdin / `1`=stdout / `2`=stderr
+- `> /dev/null`：把 stdout 導入黑洞（輸出消失）
+- `2>&1`：把 stderr 導向「stdout 現在去的地方」；`&` = 這是 fd 編號，不是檔名
+- `os.environ.get()` 永遠回傳字串，psycopg2 `port` 需要 `int()` 轉型，其他欄位不用
+- `MagicMock` 被移除的原因：連線從 `get_db_connection()`（回傳物件）改為 `get_pg()`（context manager），`patch` 替換整個 context manager 不需要指定 `return_value`
+- `出場` 從 `POSITIVE_WORDS` 移除：語意模糊（獲利出場 vs 停損出場），拿掉避免情緒方向誤判
+- `deploy.yml` 三個改動：requirements.txt 改名同步 / pytest 路徑隨資料夾搬移 / `pkill -f` 取代 `kill $(lsof)` 更穩健
+
+#### 下次繼續
+
+- [ ] 修復 `score_target` → `target_type`（analysis.py、visualization.py、api.py）
+- [ ] QA.py、ge_validation.py 連線改用 context manager
+- [ ] 遷移腳本：SQLite → PostgreSQL
 - [ ] Phase 2 NEW：PII masking（author hash 化）
 - [ ] Phase 3 NEW：JWT Authentication
 
@@ -324,4 +422,4 @@ project/
 
 | 關鍵字 | 用途 |
 |--------|------|
-| `update` | 自動讀取並同步更新三個文件（`CLAUDE.md`、`readme.md`、`project_notes.md`），將最新完成項目、進度清單、學到的概念等寫入，並回報各檔案的變動內容 |
+| `update` | 執行前先對整個 project 做一次 code review（讀取所有 `.py` 與 `.yml` 檔案，確認無功能性問題）。review 完畢後，自動讀取並同步更新三個文件（`CLAUDE.md`、`readme.md`、`project_notes.md`），將最新完成項目、進度清單、學到的概念等寫入，並回報各檔案的變動內容。同時檢查所有 `.py` 檔案的 import，確認有無未列入 `requirements.txt` 的套件，若有則補上 |

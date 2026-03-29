@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from api import app, PERIOD_MIN, PERIOD_MAX, ARTICLE_LIMIT_MIN, ARTICLE_LIMIT_MAX, ARTICLE_PERIOD_MIN, ARTICLE_PERIOD_MAX
 
@@ -31,18 +31,18 @@ STANDARD_CASES = [
 @pytest.fixture
 def mock_db_with_data():
     """
-    api=>file name=>api.py , get_db_connection=>function name
+    api=>file name=>api.py , get_pg=>context manager for DB connection
     .copy=>we don't want to change the original data
     MagicMock=>instead of connect to DB, we use MagicMock to mock the DB connection
     """
     with patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()):
-        with patch("api.get_db_connection", return_value=MagicMock()):
+        with patch("api.get_pg"):# patch 內部自動用magicmock替換get_pg，因此不需要import MagicMock
             yield
 
 @pytest.fixture
 def mock_db_empty():
     with patch("api.pd.read_sql_query", return_value=MOCK_EMPTY.copy()):
-        with patch("api.get_db_connection", return_value=MagicMock()):
+        with patch("api.get_pg"):
             yield
 
 # ===== Tests =====
@@ -108,6 +108,6 @@ def test_get_search_articles(mock_fixture, expected, request):
     assert response.status_code == 422
 
 def test_health_check():
-    with patch("api.get_db_connection", return_value=MagicMock()):
+    with patch("api.get_pg"):
         response = client.get("/health")
         assert response.status_code == 200

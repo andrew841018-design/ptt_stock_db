@@ -195,6 +195,239 @@ def get_db_connection():
 - 爬蟲用 URL 做 UNIQUE 去重，已存在的文章跳過
 - 避免每次全量重爬、重複寫入
 
+### QA.py — Pipeline 內建資料品質檢查
+
+Data Engineering 的 QA ≠ 手動點按鈕，而是在 pipeline 裡埋自動檢查點：
+
+| 檢查項目 | SQL | assert 條件 |
+|---------|-----|------------|
+| 無重複 URL | `GROUP BY url HAVING COUNT(*) > 1` | `not duplicate_urls` |
+| 無孤兒推文 | `WHERE article_id NOT IN (SELECT article_id FROM articles)` | `orphan_count == 0` |
+| articles 不為空 | `SELECT COUNT(*) FROM articles` | `article_count > 0` |
+
+**assert vs warning 的差別：**
+- `logging.warning` — 資料有問題，pipeline 繼續跑 → 錯誤資料進下游
+- `assert` — 資料有問題，拋 `AssertionError` 中止 → 強迫處理
+
+**QA.py 架構：**
+```python
+def QA_checks():        # ← 被 pipeline.py import 呼叫
+    ...
+
+if __name__ == "__main__":  # ← 也可以單獨 python QA.py 執行
+    QA_checks()
+```
+
+### HAVING vs WHERE
+
+```sql
+-- WHERE：分組前過濾原始資料
+SELECT url FROM articles WHERE push_count > 10
+
+-- HAVING：分組後過濾聚合結果
+SELECT url, COUNT(*) FROM articles GROUP BY url HAVING COUNT(*) > 1
+```
+
+`HAVING` 只能用在有 `GROUP BY` 的查詢，用來過濾 `COUNT`、`SUM` 等聚合函式的結果。
+
+### fetchone vs fetchall
+
+```python
+cursor.execute("SELECT COUNT(*) FROM articles")
+cursor.fetchone()     # → (42,)      單個 tuple
+cursor.fetchone()[0]  # → 42         取第一個欄位值
+
+cursor.execute("SELECT url, COUNT(*) FROM articles GROUP BY url HAVING COUNT(*) > 1")
+cursor.fetchall()     # → [("https://...", 2), ("https://...", 3)]   list of tuples
+                      # 無結果時 → []
+```
+
+### assert 語法
+
+```python
+# 正確：assert 是關鍵字，不是函式
+assert orphan_count == 0, f"孤兒推文 {orphan_count} 筆"
+
+# 陷阱：加括號變成 tuple，永遠是 truthy，永遠不會 fail
+assert(orphan_count == 0, "孤兒推文")  # ← 永遠通過！
+```
+
 ---
 
-*最後更新：2026-03-25（下午）*
+## 九、Logging
+
+### logging vs print
+
+| | print | logging |
+|---|---|---|
+| 輸出格式 | 只有訊息本身 | 時間 + 等級 + 訊息 |
+| 等級控制 | 無 | DEBUG / INFO / WARNING / ERROR |
+| 適合場景 | 快速測試 | 正式程式碼 |
+
+### basicConfig — 設定怎麼印
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+```
+
+| 佔位符 | 輸出內容 |
+|--------|---------|
+| `%(asctime)s` | 時間戳記，格式：`2026-03-26 10:00:00,毫秒` |
+| `%(levelname)s` | `INFO` / `WARNING` / `ERROR` |
+| `%(name)s` | logger 名稱（需手動加入 format 才會印出） |
+| `%(message)s` | `logger.info("這裡的內容")` |
+
+### getLogger — 設定誰來印
+
+```python
+logger = logging.getLogger(__name__)
+```
+
+- `__name__` = 當前檔案的模組名稱（e.g. `migrate.py` → `"migrate"`）
+- 幫這個模組的 log 在系統內部標記名字
+- 兩個實際用途：
+  1. 在 format 加 `%(name)s`，印出是哪個模組發出的訊息
+  2. 針對單一模組單獨設定等級：`logging.getLogger("migrate").setLevel(logging.ERROR)`
+- `basicConfig` 是全域設定；`getLogger` 讓你針對單一模組獨立設定
+- 目前專案用不到，但是業界標準寫法，預留彈性
+
+### 分工
+
+```
+logger.info("開始遷移")    ← 你決定印什麼內容
+basicConfig(format=...)    ← 決定格式長什麼樣
+```
+
+### f-string vs 佔位符
+
+```python
+# f-string
+logging.info(f"第 {expensive_function()} 筆")
+# 執行順序：expensive_function() 先跑 → 組合字串 → 判斷等級，不印就丟掉
+
+# 佔位符
+logging.info("第 %s 筆", expensive_function())
+# 執行順序：先判斷等級 → 等級不夠就直接停，expensive_function() 完全不跑
+```
+
+> f-string 是「做了再決定印不印」，佔位符是「先決定印不印，不印就什麼都不做」。
+
+- 實際好處：針對 `DEBUG` 等級，上線後改成 `INFO`，佔位符連字串都不組合，省效能
+- 目前專案只用 INFO / WARNING / ERROR，沒有 DEBUG，兩種寫法沒有實質差別
+
+### .env 與環境變數的陷阱
+
+```bash
+# .env 裡空值會覆蓋 os.environ.get() 的預設值
+PG_HOST=        # ← 讀進來是空字串 ""，不是 None
+PG_PORT=        # ← os.environ.get("PG_HOST", "localhost") 拿到 ""，不是 "localhost"
+```
+
+- `os.environ.get("KEY", "default")` 只有在找**不到**這個 KEY 時才用預設值
+- `.env` 裡設了空值 = 找得到，但值是 `""`，預設值完全不起作用
+- psycopg2 拿到空字串的 `host`，改走 Unix socket（`/tmp/.s.PGSQL.5432`），連線失敗
+
+**解法**：`.env` 裡要嘛填入正確值，要嘛直接刪掉該行：
+```bash
+PG_HOST=localhost   # ✅ 填入值
+PG_PORT=5432        # ✅ 填入值
+# 或直接刪掉這兩行，讓 os.environ.get() 用預設值
+```
+
+### rollback + raise 模式
+
+```python
+except psycopg2.Error as e:
+    logging.error("Failed: %s", e)
+    if conn:
+        conn.rollback()  # 撤銷這次所有操作，資料庫回到操作前的狀態
+    raise                # 把例外往上拋，讓呼叫者知道出錯了
+```
+
+- `rollback`：確保資料庫乾淨，不留半殘的表或髒資料
+- `raise`：確保你看到錯誤訊息，知道哪裡出問題
+- 結果：什麼都沒做，但知道錯在哪 → 像交易沒完成就取消
+
+---
+
+---
+
+## 十、Exception 處理模式
+
+### raise vs try/except
+
+```
+raise     → 製造 / 往上傳遞例外
+try/except → 接住例外
+```
+
+### 分層處理原則
+
+```
+底層函式    → raise（我不管，往上丟）
+中層函式    → except + 處理 + raise（rollback 等，但還是往上丟）
+最上層      → except + logging（收尾，不再 raise）
+```
+
+專案範例：
+```
+scrape_article()   → raise
+pg_helper.get_pg() → rollback + raise
+pipeline.py        → logging.error → 程式結束
+```
+
+最上層不 raise 的原因：再拋就是 unhandled exception，Python 直接印 traceback 死掉，不如自己用 logging 收尾乾淨。
+
+### str(e) vs raise
+
+```python
+# str(e) — 只記錄訊息，繼續執行（錯誤是預期內的）
+except Exception as e:
+    logging.error(f"爬取失敗：{str(e)}")
+
+# raise — 往上拋，中止執行（錯誤是嚴重的）
+except Exception as e:
+    conn.rollback()
+    raise
+```
+
+---
+
+---
+
+## 十一、Shell 輸出重導向
+
+### Linux 三個預設 file descriptor
+
+| 數字 | 名稱   | 說明           |
+|------|--------|----------------|
+| `0`  | stdin  | 標準輸入（鍵盤）|
+| `1`  | stdout | 標準輸出（正常結果）|
+| `2`  | stderr | 標準錯誤（錯誤訊息）|
+
+### `> /dev/null 2>&1 &` 拆解
+
+```bash
+> /dev/null    # stdout → 黑洞
+2>&1           # stderr → 跟 stdout 同一個地方（也就是黑洞）
+&              # 背景執行
+```
+
+- `&1` 裡的 `&` = 「這是 fd 編號，不是檔名」；若寫 `2>1` 會建立名為 `1` 的檔案
+- 為什麼不直接 `2>/dev/null`：可以，但 `2>&1` 只需寫一次目的地，改目的地時只改一處
+- 為什麼 `nohup` 還需要 `> /dev/null 2>&1`：`nohup` 只處理 SIGHUP，stdout/stderr 若沒重導向仍掛在 SSH session，SSH 斷線時 process 可能被 kill
+
+### `pkill -f` vs `kill $(lsof -t -i:PORT)`
+
+```bash
+# 用 port 找（舊版）
+kill $(lsof -t -i:8000) 2>/dev/null   # port 沒有 process 時 lsof 回傳空，kill 報錯
+
+# 用程式名稱找（新版）
+pkill -f "uvicorn api:app" || true    # 找不到時 || true 讓 exit code = 0，script 不中斷
+```
+
+*最後更新：2026-03-29*
