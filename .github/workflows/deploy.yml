@@ -18,11 +18,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r dependent_code/require_lib.txt
+          pip install -r dependent_code/requirements.txt
 
       - name: Run tests
         run: |
-          pytest test_code/test_api.py -v
+          pytest dependent_code/test_api.py -v
 
   deploy:
     needs: test
@@ -39,7 +39,11 @@ jobs:
             cd /home/ubuntu/ptt_stock_db
             source venv/bin/activate
             git pull
-            kill $(lsof -t -i:8000) 2>/dev/null
-            kill $(lsof -t -i:8501) 2>/dev/null
-            nohup uvicorn api:app --host 0.0.0.0 --port 8000 &
-            nohup streamlit run visualization.py --server.port 8501 --server.address 0.0.0.0 &
+            pkill -f "uvicorn api:app" || true
+            pkill -f "streamlit run visualization" || true
+            # 1代表stdout, 2代表stderr,>代表重導向
+            # 當>前面沒東西時，預設為1
+            # >/dev/null 2>&1 & => 輸出導向空白(null)，錯誤導向輸出導向空白(null)
+            # 簡單講=>都不印出
+            cd /home/ubuntu/ptt_stock_db/dependent_code && nohup uvicorn api:app --host 0.0.0.0 --port 8000 > /dev/null 2>&1 &
+            cd /home/ubuntu/ptt_stock_db && nohup streamlit run dependent_code/visualization.py --server.port 8501 --server.address 0.0.0.0 > /dev/null 2>&1 &
