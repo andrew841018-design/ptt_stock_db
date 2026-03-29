@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+_base = os.path.dirname(__file__)
+load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
 
 # PostgreSQL 連線設定
 PG_CONFIG = {

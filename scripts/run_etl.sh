@@ -44,6 +44,7 @@ cp "$PROJECT_DIR/backup.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
 cp "$PROJECT_DIR/test_code/ge_validation.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
 # 複製 DB，由於db可能不存在，因此用|| true 確保exit code為0(成功)
 cp "$PROJECT_DIR/dependent_code/ptt_stock.db" "$TMP_DIR/" 2>/dev/null || true
+cp "$PROJECT_DIR/.env" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
 
 # 3. 爬蟲 + 清洗 + 分析（在 /tmp 執行，PYTHONPATH 也指向 /tmp）
 log "開始執行 pipeline.py..."
