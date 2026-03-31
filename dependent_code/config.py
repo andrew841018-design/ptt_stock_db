@@ -25,6 +25,11 @@ NUM_OF_PAGES = 2000
 # 爬蟲過濾關鍵字（這類文章不爬）
 SKIP_KEYWORDS = ["公告", "盤後閒聊", "盤中閒聊", "情報"]
 
+# Redis 快取設定
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))# 6379 is the default port for Redis
+REDIS_TTL  = 86400  # 24 hours，unit is second
+
 # 資料庫資料表名稱
 ARTICLES_TABLE = "articles"
 COMMENTS_TABLE = "comments"

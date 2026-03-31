@@ -12,4 +12,5 @@ pytest
 boto3
 python-dotenv
 psycopg2-binary
+redis
 great_expectations==0.18.19
