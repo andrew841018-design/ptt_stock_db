@@ -3,9 +3,12 @@ import datetime
 from typing import Literal
 from fastapi import FastAPI, Query, HTTPException
 from pg_helper import get_pg
+from cache_helper import get_cache, set_cache
 from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE
 
 app = FastAPI()
+
+CACHE_KEY_ARTICLES  = "articles_df"
 
 PERIOD_MIN          = 1
 PERIOD_MAX          = 30
@@ -16,10 +19,13 @@ ARTICLE_PERIOD_MAX  = 365
 
 
 def load_articles_df() -> pd.DataFrame:
-    """讀取文章資料（JOIN sentiment_scores），return the dataframe of the articles"""
+    """讀取文章資料（JOIN sentiment_scores），Cache-Aside：先查 Redis，沒有再查 DB"""
+    df = get_cache(CACHE_KEY_ARTICLES)
+    if df is not None:
+        return df
     try:
         with get_pg() as conn:
-            return pd.read_sql_query(f"""
+            df = pd.read_sql_query(f"""
                 SELECT
                     a.article_id                    AS "Article_id",
                     a.title                         AS "Title",
@@ -34,6 +40,8 @@ def load_articles_df() -> pd.DataFrame:
                     AND s.target_type = 'article'
                     AND s.method      = 'jieba'
             """, conn)
+        set_cache(CACHE_KEY_ARTICLES, df)
+        return df
     except Exception as e:
         raise HTTPException(status_code=500, detail={"message": "database search failed: " + str(e)})
 
