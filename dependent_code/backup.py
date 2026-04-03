@@ -3,13 +3,10 @@ import logging
 import subprocess
 import os
 from datetime import datetime
-from config import PG_CONFIG
+from config import PG_CONFIG, S3_BUCKET, DOCKER_PATH, DB_CONTAINER
 
 
-s3        = boto3.client('s3')
-BUCKET    = 'ptt-sentiment-backup'
-DOCKER    = '/usr/local/bin/docker'
-CONTAINER = 'inspiring_wozniak'
+s3 = boto3.client('s3')
 
 
 def backup_database():
@@ -20,16 +17,16 @@ def backup_database():
     try:
         with open(dump_path, 'w') as f:
             subprocess.run([
-                DOCKER, 'exec',
+                DOCKER_PATH, 'exec',
                 '-e', f'PGPASSWORD={PG_CONFIG["password"]}',
-                CONTAINER,
+                DB_CONTAINER,
                 'pg_dump',
                 '-h', PG_CONFIG['host'],
                 '-p', str(PG_CONFIG['port']),
                 '-U', PG_CONFIG['user'],
                 '-d', PG_CONFIG['dbname'],
             ], stdout=f, check=True)
-        s3.upload_file(dump_path, BUCKET, s3_key)
+        s3.upload_file(dump_path, S3_BUCKET, s3_key)
         logging.info(f'Backup completed and uploaded to {s3_key}')
     finally:# 上傳完刪除暫存檔（無論成功失敗都清掉）,finally可以避免上傳失敗而沒刪除暫存檔的情況
         if os.path.exists(dump_path):

@@ -4,18 +4,16 @@ from typing import Literal
 from fastapi import FastAPI, Query, HTTPException
 from pg_helper import get_pg
 from cache_helper import get_cache, set_cache
-from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE
+from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE, CACHE_KEY_ARTICLES
 
 app = FastAPI()
 
-CACHE_KEY_ARTICLES  = "articles_df"
-
-PERIOD_MIN          = 1
-PERIOD_MAX          = 30
-ARTICLE_LIMIT_MIN   = 1
-ARTICLE_LIMIT_MAX   = 100
-ARTICLE_PERIOD_MIN  = 1
-ARTICLE_PERIOD_MAX  = 365
+PERIOD_MIN         = 1
+PERIOD_MAX         = 30
+ARTICLE_LIMIT_MIN  = 1
+ARTICLE_LIMIT_MAX  = 100
+ARTICLE_PERIOD_MIN = 1
+ARTICLE_PERIOD_MAX = 365
 
 
 def load_articles_df() -> pd.DataFrame:
@@ -36,10 +34,9 @@ def load_articles_df() -> pd.DataFrame:
                     s.score                         AS "Article_Sentiment_Score"
                 FROM {ARTICLES_TABLE} a
                 JOIN {SENTIMENT_SCORES_TABLE} s
-                    ON  s.target_id   = a.article_id
-                    AND s.target_type = 'article'
-                    AND s.method      = 'jieba'
+                    ON s.article_id = a.article_id
             """, conn)
+        df['Published_Time'] = pd.to_datetime(df['Published_Time'])
         set_cache(CACHE_KEY_ARTICLES, df)
         return df
     except Exception as e:
@@ -49,7 +46,6 @@ def load_articles_df() -> pd.DataFrame:
 @app.get("/sentiments/today")  # 名稱可自由設計
 def get_today_sentiment():
     df = load_articles_df()
-    df['Published_Time'] = pd.to_datetime(df['Published_Time'])
     df['Published_Date'] = df['Published_Time'].dt.date
     today = df[df['Published_Date'] == df['Published_Date'].max()]
     if len(today) == 0:
@@ -63,7 +59,6 @@ def get_change_sentiment():
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
-    df['Published_Time'] = pd.to_datetime(df['Published_Time'])
     df['Published_Date'] = df['Published_Time'].dt.date
     today     = df[df['Published_Date'] == df['Published_Date'].max()]
     yesterday = df[df['Published_Date'] == df['Published_Date'].max() - datetime.timedelta(days=1)]
@@ -78,7 +73,6 @@ def get_recent_sentiment_score(period: int = Query(default=10, ge=PERIOD_MIN, le
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
-    df['Published_Time'] = pd.to_datetime(df['Published_Time'])
     start_time  = df['Published_Time'].max() - datetime.timedelta(days=period)
     recent_data = df[df['Published_Time'] >= start_time]
     if len(recent_data) == 0:
@@ -90,13 +84,12 @@ def get_recent_sentiment_score(period: int = Query(default=10, ge=PERIOD_MIN, le
 @app.get("/articles/top_push")
 def get_top_push_articles(
     limit:       int                                      = Query(default=10, ge=ARTICLE_LIMIT_MIN, lt=ARTICLE_LIMIT_MAX + 1),
-    period:      int                                      = Query(default=7,  ge=ARTICLE_PERIOD_MIN, lt=ARTICLE_PERIOD_MAX + 1),  # days
+    period:      int                                      = Query(default=7,  ge=ARTICLE_PERIOD_MIN, lt=ARTICLE_PERIOD_MAX + 1),
     period_type: Literal["day", "week", "month", "year"] = Query(default="day"),
 ):
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
-    df['Published_Time'] = pd.to_datetime(df['Published_Time'])
     df['Published_Time'] = df['Published_Time'].dt.date
     # filter by period
     end_date  = df['Published_Time'].max()
@@ -125,6 +118,38 @@ def search_articles(keyword: str):
     if len(result) == 0:
         raise HTTPException(status_code=404, detail={"message": "No related articles"})
     return {"search_articles": result[['Title', 'Push_count', 'Published_Time', 'Url']].to_dict(orient="records"), "message": "Success"}
+
+
+@app.get("/correlation/0050")
+def get_correlation(period: int = Query(default=30, ge=1, le=365)):
+    """PTT 情緒分數 vs 0050 隔日漲跌。每個交易日：當日 PTT 平均情緒 → 隔日漲跌價差。"""
+    try:
+        with get_pg() as conn:
+            df = pd.read_sql_query(f"""
+                SELECT
+                    sub.sentiment_date,
+                    sub.avg_sentiment,
+                    sp.change              AS next_day_change
+                FROM (
+                    SELECT
+                        DATE(a.published_at) AS sentiment_date,
+                        AVG(s.score)         AS avg_sentiment
+                    FROM {ARTICLES_TABLE} a
+                    JOIN {SENTIMENT_SCORES_TABLE} s ON s.article_id = a.article_id
+                    WHERE a.published_at >= NOW() - INTERVAL '{period} days'
+                    GROUP BY DATE(a.published_at)
+                ) sub
+                JOIN {STOCK_PRICES_TABLE} sp
+                    ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
+                ORDER BY sub.sentiment_date
+            """, conn)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": str(e)})
+
+    if df.empty:
+        raise HTTPException(status_code=404, detail={"message": "查無資料，sentiment_scores 可能尚未填入"})
+
+    return {"period": period, "data": df.to_dict(orient="records")}
 
 
 @app.get("/health")

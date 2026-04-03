@@ -1,7 +1,7 @@
 #!/bin/bash  # tell the system to use the bash shell to execute the script
 
 # ETL Pipeline 自動化腳本
-# 執行順序：activate venv → 爬蟲 → 清洗分析 → log 結果
+# 執行順序：activate venv → 爬蟲 → S3 備份 → GE 驗證 → log 結果
 
 #先找到當前資料夾，然後往上一層，取得絕對路徑
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # root directory of the project
@@ -34,19 +34,17 @@ if [ ! -f "$PYTHON" ]; then
 fi
 log "Python 確認成功: $PYTHON"
 
-# 2. 複製所有需要的 .py 檔到 /tmp
+# 2. 複製所有需要的檔案到 /tmp
 log "複製腳本到暫存目錄: $TMP_DIR"
 #1 代表正常輸出，2 代表錯誤輸出，2>&1 代表把錯誤導向標準輸出（輸出正常輸出＋錯誤輸出）
 cp "$PROJECT_DIR/dependent_code/"*.py "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
-#拋棄error meesage,用在不存在也沒關係的檔案
-cp "$PROJECT_DIR/dependent_code/"*.txt "$TMP_DIR/" 2>/dev/null  # user_dict.txt 等
-cp "$PROJECT_DIR/backup.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
-cp "$PROJECT_DIR/test_code/ge_validation.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
-# 複製 DB，由於db可能不存在，因此用|| true 確保exit code為0(成功)
-cp "$PROJECT_DIR/dependent_code/ptt_stock.db" "$TMP_DIR/" 2>/dev/null || true
+# scrapers/ 是子目錄（package），需用 -r 遞迴複製，否則 pipeline.py 找不到 PttScraper 等 class
+cp -r "$PROJECT_DIR/dependent_code/scrapers" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
+cp "$PROJECT_DIR/dependent_code/backup.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
+cp "$PROJECT_DIR/dependent_code/ge_validation.py" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
 cp "$PROJECT_DIR/.env" "$TMP_DIR/" 2>&1 | tee -a "$LOG_FILE"
 
-# 3. 爬蟲 + 清洗 + 分析（在 /tmp 執行，PYTHONPATH 也指向 /tmp）
+# 3. 爬蟲（在 /tmp 執行，PYTHONPATH 也指向 /tmp）
 log "開始執行 pipeline.py..."
 cd "$TMP_DIR" && "$PYTHON" pipeline.py 2>&1 | tee -a "$LOG_FILE"
 # PIPESTATUS[0] 代表 pipeline.py 的 exit code
@@ -59,10 +57,7 @@ if [ $PIPELINE_EXIT -ne 0 ]; then
 fi
 log "pipeline.py 執行完成"
 
-# 同步 DB 回原始位置（爬蟲寫入了新資料）
-cp "$TMP_DIR/ptt_stock.db" "$PROJECT_DIR/dependent_code/ptt_stock.db" 2>/dev/null || true
-
-# 4. 備份到 S3（從 /tmp 讀取 db）
+# 4. 備份到 S3
 log "開始備份到 S3..."
 # && 代表前一個指令成功後，才執行後一個指
 cd "$TMP_DIR" && "$PYTHON" backup.py 2>&1 | tee -a "$LOG_FILE"

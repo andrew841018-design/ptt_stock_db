@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-import jieba
-from collections import Counter
 import datetime
+from keybert import KeyBERT
 from pg_helper import get_pg
-from plt_function import plot_sentiment_trend, plot_push_count_distribution, plot_daily_article_count
-from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE
+from plt_function import plot_sentiment_trend, plot_push_count_distribution, plot_daily_article_count, plot_sentiment_vs_stock, plot_sentiment_and_price_trend
+from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, TWSE_STOCK_NAME, STOCK_PRICES_TABLE
 
 
 @st.cache_data
@@ -21,9 +20,7 @@ def load_data():
                 s.score          AS "Article_Sentiment_Score"
             FROM {ARTICLES_TABLE} a
             JOIN {SENTIMENT_SCORES_TABLE} s
-                ON  s.target_id   = a.article_id
-                AND s.target_type = 'article'
-                AND s.method      = 'jieba'
+                ON s.article_id = a.article_id
         """, conn)
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
@@ -67,18 +64,46 @@ st.metric(label="Today's Sentiment Score", value=score, delta=change_score)
 st.subheader("Today's Top 10 Trending Articles")  # 顯示今日前10名熱門文章
 st.dataframe(df.nlargest(10, 'Push_count')[['Title', 'Push_count', 'Article_Sentiment_Score', 'Date']])
 
-# 關鍵字統計 TOP20
-text  = ' '.join(df['Title'].tolist())  # combine all the titles into a single string
-words = jieba.lcut(text)
-stopwords = set([
-    '什麼', '宣布', '這個', '那個', '因為', '所以', '但是', '如果',
-    '已經', '可以', '沒有', '表示', '認為', '今天', '明天', '昨天',
-    '的', '了', '在', '是', '我', '他', '她', '它', '們',
-    '這', '那', '也', '都', '不', '就', '與', '及', '或',
-    '請問', '有沒有', '大家', '一下', '一個', '如何', '怎麼', 'Re', '請益', '心得', '快訊',
-    '投資', 'ETF', '是不是', '營收', '今年'
-])
-counter      = Counter(w for w in words if len(w) > 1 and w not in stopwords and not w.isnumeric())  # count the frequency of each word into dictionary
-top_20_words = pd.DataFrame(counter.most_common(20), columns=['Word', 'Frequency'])
+@st.cache_resource
+def _kw_model():
+    return KeyBERT()
+
+# 關鍵字統計 TOP20（KeyBERT）
+text         = ' '.join(df['Title'].tolist())
+keywords     = _kw_model().extract_keywords(text, keyphrase_ngram_range=(1, 2), top_n=20)
+top_20_words = pd.DataFrame(keywords, columns=['Word', 'Score'])
 st.subheader("Top 20 Keywords")
 st.dataframe(top_20_words)
+
+# ── 情緒 vs 股價關聯分析 ──────────────────────────────────────────────────
+st.subheader("情緒 vs 股價關聯分析")
+
+@st.cache_data
+def load_correlation_data():
+    with get_pg() as conn:
+        return pd.read_sql_query(f"""
+            SELECT
+                sub.sentiment_date,
+                sub.avg_sentiment,
+                sp.change              AS next_day_change
+            FROM (
+                SELECT
+                    DATE(a.published_at) AS sentiment_date,
+                    AVG(s.score)         AS avg_sentiment
+                FROM {ARTICLES_TABLE} a
+                JOIN {SENTIMENT_SCORES_TABLE} s ON s.article_id = a.article_id
+                GROUP BY DATE(a.published_at)
+            ) sub
+            JOIN {STOCK_PRICES_TABLE} sp
+                -- 觀察情緒分數的下一個交易日股價變化，比對市場情緒與價格變化是否存在關聯
+                ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
+            ORDER BY sub.sentiment_date
+        """, conn)
+
+corr_df = load_correlation_data()
+
+if corr_df.empty:
+    st.warning("目前尚無情緒分數資料，待 BERT 模型上線後顯示。")
+else:
+    st.pyplot(plot_sentiment_vs_stock(corr_df, TWSE_STOCK_NAME))
+    st.pyplot(plot_sentiment_and_price_trend(corr_df, TWSE_STOCK_NAME))

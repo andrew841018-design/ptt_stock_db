@@ -18,32 +18,37 @@
 
 資料流：`爬蟲 → SQLite → 情緒分析 → FastAPI + Streamlit 儀表板`
 
-技術棧：Python、SQLite、FastAPI、Streamlit、pytest、GitHub Actions CI/CD、AWS EC2
+技術棧：Python、SQLite / PostgreSQL、FastAPI、Streamlit、Redis、pytest、GitHub Actions CI/CD、AWS EC2
 
 ### 專案結構
 
 ```
 project/
-├── dependent_code/         # 主要程式碼
-│   ├── pipeline.py         # 主流程
-│   ├── web_scraping.py     # 爬蟲
-│   ├── analysis.py         # 資料清洗 + 情緒分數
-│   ├── sentiment.py        # jieba 情緒分析
-│   ├── ptt_sentiment_dict.py
-│   ├── data_cleanner.py
-│   ├── visualization.py    # Streamlit 儀表板
-│   ├── plt_function.py
-│   ├── Create_DB.py
-│   └── user_dict.txt / ntusd-*.txt
-├── test_code/
-│   ├── api.py              # FastAPI
-│   ├── test_api.py         # pytest
-│   └── QA.py
-├── backup.py
-├── setup.sh
-├── deploy_yml_syntax.md
-├── troubleshooting.md      # 所有踩過的坑
-└── CLAUDE.md               # 本檔案
+├── dependent_code/
+│   ├── pipeline.py           # 主流程（爬蟲 → QA）
+│   ├── config.py             # 集中管理所有常數
+│   ├── schema.py             # PostgreSQL 建表 + index
+│   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
+│   ├── cache_helper.py       # Redis Cache-Aside helper
+│   ├── scrapers/
+│   │   ├── __init__.py       # sys.path 統一設定
+│   │   ├── base_scraper.py   # 爬蟲抽象父類別
+│   │   ├── ptt_scraper.py    # PTT Stock 板爬蟲
+│   │   ├── cnyes_scraper.py  # 鉅亨網爬蟲
+│   │   └── twse_fetcher.py   # 0050 股價抓取（TWSE API）
+│   ├── api.py                # FastAPI REST API
+│   ├── visualization.py      # Streamlit 儀表板
+│   ├── plt_function.py       # matplotlib 圖表函式
+│   ├── QA.py                 # 資料品質檢查
+│   ├── ge_validation.py      # Great Expectations 驗證
+│   ├── test_api.py           # pytest 自動測試
+│   ├── backup.py             # S3 備份
+│   └── requirements.txt
+├── scripts/
+│   └── run_etl.sh
+├── .github/workflows/
+│   └── deploy.yml
+└── CLAUDE.md
 ```
 
 ---
@@ -72,8 +77,12 @@ project/
 - [x] Index 設計完成（4 個 B-tree index，含選型原則與 EXPLAIN ANALYZE）
 - [x] launchd 排程修復（macOS Sequoia cron 失效 → 改用 launchd，解決 TCC Desktop 限制）
 - [x] ETL 自動排程驗證（etl_20260325.log 成功產生）
-- [ ] Phase 4（進行中）：遷移腳本（SQLite → PostgreSQL）
-- [ ] Phase 4（進行中）：改用 psycopg2 連線
+- [x] Redis 快取實作（Cache-Aside Pattern，TTL 24小時，37倍速度提升）
+- [x] AWS CLI 安裝與設定
+- [x] Phase 4：遷移腳本（SQLite → PostgreSQL）完成（migrate.py）
+- [x] Phase 4：psycopg2 連線（pg_helper.py 已實作）
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
 - [ ] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
 - [ ] Phase 6：Airflow、BERT、CI/CD 進階
 
@@ -401,6 +410,162 @@ project/
 - [ ] 遷移腳本：SQLite → PostgreSQL
 - [ ] Phase 2 NEW：PII masking（author hash 化）
 - [ ] Phase 3 NEW：JWT Authentication
+
+---
+
+### 2026-04-01
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| Redis 快取實作 | Docker 啟動 redis:7 容器（redis_cache，port 6379，--restart=always） |
+| cache_helper.py 新建 | `get_cache()` / `set_cache()`，Cache-Aside Pattern，含 RedisError 保護 |
+| api.py 快取整合 | `load_articles_df()` 實作 Cache-Aside：先查 Redis → MISS 才查 DB → 存進 Redis |
+| config.py 擴充 | 新增 REDIS_HOST / REDIS_PORT / REDIS_TTL（86400 = 24小時） |
+| requirements.txt | 補上 redis 套件 |
+| 速度驗證 | 第一次 4.11s（DB），第二次 0.11s（Redis），提升 37 倍 |
+| test_api.py 補強 | 舊 fixtures 加 mock Redis；新增 test_cache_hit / test_cache_miss / test_cache_redis_down / test_set_and_get_cache，全部 15 個測試通過 |
+| deploy.yml 更新 | 加入 Redis service（image: redis:7），讓 CI/CD 也能跑真實 Redis 測試 |
+| backup.py bug 修復 | `DOCKER` / `CONTAINER` 移到模組頂層；`'localhost'` 改用 `PG_CONFIG['host']`；移除 finally 中文 what 註解 |
+| config.py 改善 | `load_dotenv` 改為先找同層 .env，找不到再往上 |
+| run_etl.sh 改善 | 新增複製 .env 到 /tmp |
+| 基礎設施 | Docker Desktop 設為開機自動啟動；inspiring_wozniak 和 redis_cache 均設為 --restart=always |
+| AWS CLI | 安裝完成，`aws configure` 設定完成 |
+| launchd 排程 | 每天 10:25 自動跑 ETL |
+
+#### 學到的概念
+
+- Cache-Aside Pattern：先查 Redis → MISS 才查 DB → 存進 Redis（由應用層控制快取）
+- Redis 是 key-value store，內部用 hash table，查詢 O(1)
+- TTL（Time To Live）：`setex` = SET + EXpire，到期自動刪除
+- `StringIO`：把字串包成 file-like object，讓 `pd.read_json()` 接受
+- `Optional[X]` = X 或 None（Python 3.9 寫法，等同 `X | None`）
+- `orient='table'`：JSON 序列化時保留 dtype，避免 int→float、datetime→str 型別漂移
+- `patch("api.get_cache")` vs `patch("cache_helper.get_cache")`：要 patch 使用者的命名空間
+- `with patch` 嵌套 vs 平行（逗號分隔）：兩者效果相同，平行語法更清楚
+- `side_effect` vs `return_value`：side_effect 觸發行為（拋錯/自訂函式），return_value 固定回傳值
+- unit test 測的是「程式面對錯誤時的行為」，不是「基礎設施會不會出錯」
+- GitHub Actions services：CI/CD 環境自動啟動 Docker 容器供測試使用
+- file descriptor（OS 層級整數）vs file-like object（Python 層級物件）
+
+#### 下次繼續
+
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：星型 Schema、BERT 情緒模型
+- [ ] Phase 6：Airflow
+
+---
+
+### 2026-04-02
+
+#### 完成項目（上午）
+
+| 項目 | 說明 |
+|------|------|
+| migrate.py 新建 | SQLite → PostgreSQL 完整遷移腳本，冪等設計（可重複執行） |
+| 文章遷移 | 14,024 筆，含型別轉換（Push_count TEXT→INTEGER、時間 TEXT→TIMESTAMP）|
+| 留言遷移 | 1,422,053 筆，分批寫入（BATCH_SIZE=5000）|
+| 情緒分數遷移 | 14,024 筆，batch 內 dedup 避免衝突 |
+| id_map 設計 | SQLite article_id ≠ PG article_id，用 URL 當橋梁建立對應表 |
+
+#### 完成項目（下午）
+
+| 項目 | 說明 |
+|------|------|
+| jieba 完整移除 | analysis.py、sentiment.py、ntusd-*.txt、user_dict.txt 全部刪除；visualization.py 改用 regex 斷詞 |
+| Dcard 移除 | Cloudflare Bot Fight Mode 無法繞過，dcard_scraper.py 刪除，config/pipeline 同步清理 |
+| sentiment_scores schema 簡化 | 移除 target_type / target_id / method，改為 article_id FK（一篇文章一個分數）|
+| scrapers/__init__.py 新建 | 集中處理 sys.path，所有爬蟲 import 前自動執行 |
+| 多來源爬蟲架構 | PTT + 鉅亨網，base_scraper 統一 DB 寫入邏輯 |
+| TWSE stock_prices | 新建 stock_prices 表，twse_fetcher.py 抓 0050 股價（TWSE API URL 更新：exchangeReport → rwd/zh/afterTrading）|
+| 相關性分析 | api.py 新增 /correlation/0050，visualization.py 新增兩張圖（散布圖 + 雙軸折線）|
+| TWSE_STOCKS 簡化 | 從 50 支個股改為只追蹤 0050，config 改用 TWSE_STOCK_NO / TWSE_STOCK_NAME |
+| ptt_scraper 重構 | _parse_list_item → _parse_article_html；_parse_push_count 三段式可讀性改善（爆/XX/X數字）|
+| deploy.yml 版本 | 誤改為 @v4/@v5，後於 2026-04-03 還原為正確的 @v6（2026 年當前版本）|
+| 文件全面更新 | readme.md、CLAUDE.md 架構圖與 schema 同步至最新狀態 |
+
+#### 學到的概念
+
+- `relativedelta(months=i)`：精確往前推 N 個月，不用擔心月份天數不同
+- `strftime("%Y%m%d")`：date 物件轉字串格式
+- `@staticmethod`：method 不使用 self，語意上與 class 狀態無關
+- TWSE API：每次回傳整個月資料，`date` 參數只要填該月任意一天
+- `tqdm` 雙層進度條：外層留著（`leave=True`），內層跑完消失（`leave=False`）
+- `reversed(list)`：不改原 list，回傳 iterator
+
+#### 下次繼續
+
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：BERT 情緒分析實作（sentiment_scores 填入資料）
+- [ ] Phase 5：星型 Schema（資料倉儲）
+- [ ] Phase 6：Airflow
+
+---
+
+### 2026-04-03
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| stock_prices table 簡化 | 移除 stock_no、stock_name、volume 欄位，因為只追蹤 0050 一支股票，這些欄位冗餘 |
+| schema.py 更新 | UNIQUE constraint 改為只在 trade_date，移除 idx_stock_prices_stock_no index，改為 idx_stock_prices_trade_date |
+| twse_fetcher.py 簡化 | 移除外層 for 迴圈（只剩一支股票），INSERT 移除 stock_no/stock_name/volume 欄位 |
+| Subquery 模式修復 GROUP BY | api.py 和 visualization.py 的相關性查詢改用 subquery 先聚合再 JOIN，解決非聚合欄位必須全部放進 GROUP BY 的問題 |
+| KeyBERT 取代 regex 斷詞 | visualization.py 的關鍵字統計從 regex 改用 KeyBERT，`keyphrase_ngram_range=(1,2)` 抽取 1-2 詞組合，`top_n=20` |
+| @st.cache_resource 快取模型 | KeyBERT 模型用 `@st.cache_resource`（重量級資源），vs DataFrame 用 `@st.cache_data` |
+| BERT config 框架 | config.py 新增 BERT_MODEL、PUSH_TAG_WEIGHT、TITLE_WEIGHT、CONTENT_WEIGHT、COMMENT_WEIGHT，Phase 5 實作時直接 import |
+| STOCK_PRICES_TABLE 加入 config | config.py 新增 `STOCK_PRICES_TABLE = "stock_prices"`，所有用到此表的地方改用 config 變數 |
+| deploy.yml @v6 確認 | 確認 actions/checkout@v6 和 actions/setup-python@v6 是正確版本（2026 年當前版本）；前次誤改為 @v4/@v5 已還原 |
+| keybert 安裝 | venv 中 `pip install keybert`，requirements.txt 已加入 |
+
+#### 學到的概念
+
+- **GROUP BY 規則**：SELECT 中所有非聚合欄位（非 AVG/SUM/COUNT 等）都必須放進 GROUP BY，PostgreSQL 無法推斷哪個欄位才是「真正的 key」
+- **GROUP BY 只看 SELECT，不看整個 table**：只有 SELECT 裡出現的欄位才需要判斷要不要放 GROUP BY，table 裡其他欄位完全不管
+- **AVG 只是「怎麼壓」，GROUP BY 才是「按什麼切」**：avg_sentiment 是壓縮之後的結果，GROUP BY 就是壓縮動作本身；沒有 GROUP BY，AVG 會把全部資料壓成一個值
+- **Subquery 解法**：在 subquery 先做聚合（GROUP BY 只放需要分組的欄位），外層再 JOIN 其他表取值，避免把不需要的欄位塞進 GROUP BY
+  ```sql
+  SELECT sub.sentiment_date, sub.avg_sentiment, sp.close
+  FROM (
+      SELECT DATE(published_at) AS sentiment_date, AVG(score) AS avg_sentiment
+      FROM articles a JOIN sentiment_scores s ON ...
+      GROUP BY DATE(published_at)   -- 只有這一個 key
+  ) sub
+  JOIN stock_prices sp ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
+  ```
+- **聚合欄位判斷**：能用 AVG/SUM/COUNT 等函式「多對一壓縮」的數值才算聚合欄位（score、push_count）；代表個別實體的欄位（id、url、title）每筆都不同，不能聚合
+- **@st.cache_resource vs @st.cache_data**：`cache_resource` 用於重量級物件（模型、DB 連線），整個 app session 共用一份；`cache_data` 用於 DataFrame 等資料，每個參數組合各快取一份
+- **KeyBERT 原理**：用 BERT 算句子和候選詞的語意相似度，`keyphrase_ngram_range=(1,2)` 表示 1 到 2 個字的詞組，`top_n` 控制回傳關鍵詞數量；不需要額外讀 text，`extract_keywords(text)` 一次完成
+
+- **stock_prices 移除 sp.close**：相關性分析只需要 `next_day_change`，`close` 本身跟情緒預測無關；plt_function.py 右軸同步改為畫 `next_day_change`
+- **@abstractmethod 是框架，不是實作**：base class 只定義「要有什麼方法、回傳什麼格式」，實際邏輯在子類別；base 的空殼永遠不會被執行
+- **Python import 時掃描 class 結構**：不用執行任何方法，import 時就已知道哪些 abstractmethod 有沒有被實作；沒實作 → 建立物件時直接報錯
+- **base class 的分工**：子類別負責「怎麼爬」（get_source_info / fetch_articles），base 負責「怎麼存」（run / _save_to_db / _insert_*）；新增來源只要加子類別，DB 邏輯完全不用動
+- **繼承語法 `class 子類別(父類別)`**：擁有父類別所有方法 + 必須實作父類別的 abstractmethod；沒有括號就是普通 class，跟父類別完全無關
+- **push_count 設計修正**：cnyes 無推文數，改為明確回傳 `None`（語意正確），schema 改為 `INTEGER`（允許 NULL），base_scraper 用 `.get('push_count')` 取值
+- **comments 設計修正**：`_insert_comments` 改為 `if article.get('comments')` 才呼叫，不再靠空 list 默默跳過
+- **Retry 架構**：`_get_with_retry()` 統一放在 base_scraper，所有子類別繼承後直接用 `self._get_with_retry()`；retry 次數由 `config.MAX_RETRY` 控制；失敗時 exponential backoff（2s、4s、8s...）；**未來新增任何來源，HTTP 請求一律用 `self._get_with_retry()`，不用 `requests.get()`**
+- **published_at 單位**：PTT 和鉅亨網都是 Unix timestamp（秒），都用 `datetime.fromtimestamp()` 轉換，單位一致
+- **QA 架構強化**：schema.py 對 articles（title/content/url/published_at）和 comments（user_id/push_tag/message）加 NOT NULL 約束；QA.py 新增 sources 不為空檢查、來源專屬檢查（PTT push_count 不為 NULL）；schema NOT NULL 需重建 DB 才生效（待 pipeline 跑完後執行）
+- **cnyes API 結構修正**：回傳格式是 `{"items": {"data": [...]}}` 而非 `{"data": {"items": [...]}}`，`_fetch_news_list` 取值路徑已修正
+- **cnyes page_size 加入 config**：`SOURCES["cnyes"]["page_size"] = 30`，`_fetch_news_list` 改用 `_SOURCE["page_size"]`
+- **hardcoded 字串清查**：backup.py 的 BUCKET/DOCKER/CONTAINER、twse_fetcher 的 sleep(3)、api.py 的 CACHE_KEY 全部移進 config；API 查詢限制常數（PERIOD_MIN 等）留在 api.py（只有 api 用，不屬於全域設定）
+- **api.py 效能修正**：`pd.to_datetime()` 從四個 endpoint 各自轉換，改為在 `load_articles_df()` 裡做一次
+- **backup.py 容器名稱修正**：`inspiring_wozniak` → `ptt_stock_db`（重建容器後名稱已改）
+- **ge_validation.py 來源分離**：JOIN sources 表，PTT 和鉅亨網各自套用對應的 URL regex 和 push_count 規則；`_log_result()` 抽成函式避免重複
+- **正規化的 JOIN 代價**：articles JOIN sources 取 source_name 是正規化的正常代價；目前只有 2 個來源規模小，JOIN 沒問題；Phase 5 星型 schema 時改為 denormalization（已記錄在 memory）
+
+#### 下次繼續
+
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：BERT 情緒分析實作（bert_sentiment.py，config.py 框架已就位）
+- [ ] Phase 5：資料倉儲（星型 schema）
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
 
 ---
 

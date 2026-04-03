@@ -1,7 +1,6 @@
 requests
 beautifulsoup4
 pandas
-jieba
 fastapi
 uvicorn
 streamlit
@@ -13,4 +12,8 @@ boto3
 python-dotenv
 psycopg2-binary
 redis
+python-dateutil
 great_expectations==0.18.19
+keybert
+transformers
+torch

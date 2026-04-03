@@ -9,16 +9,13 @@ client = TestClient(app)
 
 # ===== Mock 資料 =====
 MOCK_DATA = pd.DataFrame({
-    "Article_id": [1, 2, 3],
-    "Title": ["台積電大漲", "聯發科分析", "台積電展望"],
-    "Push_count": [50, 30, 100],
-    "Author": ["user1", "user2", "user3"],
-    "Url": ["http://a.com", "http://b.com", "http://c.com"],
-    "Date": ["2024/01/01", "2024/01/01", "2024/01/02"],
-    "Content": ["內容1", "內容2", "台積電內容3"],
-    "Scraped_time": ["2024-01-01", "2024-01-01", "2024-01-02"],
+    "Article_id":             [1, 2, 3],
+    "Title":                  ["台積電大漲", "聯發科分析", "台積電展望"],
+    "Push_count":             [50, 30, 100],
+    "Author":                 ["user1", "user2", "user3"],
+    "Url":                    ["http://a.com", "http://b.com", "http://c.com"],
+    "Published_Time":         pd.to_datetime(["2024-01-01 10:00:00", "2024-01-01 11:00:00", "2024-01-02 10:00:00"]),
     "Article_Sentiment_Score": [0.5, -0.3, 0.8],
-    "Published_Time": ["2024-01-01 10:00:00", "2024-01-01 11:00:00", "2024-01-02 10:00:00"],
 })
 
 MOCK_EMPTY = pd.DataFrame({col: [] for col in MOCK_DATA.columns})
