@@ -64,7 +64,9 @@ SOURCES = {
 }
 
 # 爬蟲共用設定
-MAX_RETRY = 5
+MAX_RETRY       = 5
+REQUEST_DELAY   = 0.3   # 通用請求間隔（秒），防 DDOS 封鎖
+TWSE_DELAY      = 3     # TWSE 官方限速，每次請求間隔至少 3 秒
 
 # 資料庫資料表名稱
 ARTICLES_TABLE = "articles"
