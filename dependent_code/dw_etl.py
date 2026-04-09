@@ -58,7 +58,7 @@ def populate_dim_source(cur) -> None:
     """從 OLTP sources 同步至 dim_source，同時填入 market_id 和 tracked_stock"""
     # market_code → market_id 的 lookup
     cur.execute("SELECT market_id, market_code FROM dim_market")
-    market_map = {row[1]: row[0] for row in cur.fetchall()}
+    market_map = {market_code: market_id for market_id, market_code in cur.fetchall()}
 
     # 取 OLTP sources 清單
     cur.execute("SELECT source_id, source_name, url FROM sources")

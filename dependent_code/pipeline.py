@@ -2,6 +2,7 @@ import sys
 import logging
 import concurrent.futures
 
+from schema import create_schema
 from scrapers.ptt_scraper import PttScraper
 from scrapers.cnyes_scraper import CnyesScraper
 from scrapers.reddit_scraper import RedditScraper
@@ -10,7 +11,13 @@ from scrapers.us_stock_fetcher import UsStockFetcher
 from QA import QA_checks
 from ge_validation import ge_validate
 from reparse import repair
+from pii_masking import run as run_pii
+from bert_sentiment import run_batch_inference
+from fetch_etf_holdings import run as run_fetch_etf
+from stock_matcher import run_matcher
 from dw_etl import run_etl
+from looker_export import main as run_looker_export
+from backup import backup_database
 
 # stream=sys.stdout：logging 寫 stdout，tqdm 保持 stderr，redirect 時乾淨分離
 logging.basicConfig(
@@ -95,8 +102,47 @@ def transform() -> None:
 
 
 if __name__ == "__main__":
+    # Step 0：確保 OLTP 表存在（IF NOT EXISTS，幂等）
+    create_schema()
+
+    # Step 1：爬蟲寫入 OLTP
     extract()
+
+    # Step 2：QA + 自動修復 + GE 驗證
     transform()
-    logging.info("[Load] 批次寫入 PostgreSQL 已於 Extract 階段完成")
-    run_etl()  # DW ETL：建表 → 填維度 → 填事實 → 刷新 Data Mart
-    logging.info("[DW] Data Warehouse ETL 完成")
+
+    # Step 3：PII 遮蔽（repair 完再遮蔽，避免 repair 拿到已遮蔽的資料）
+    try:
+        run_pii()
+    except Exception as e:
+        logging.warning(f"[PII] 失敗（不中止 pipeline）：{e}")
+
+    # Step 4：BERT 情緒推論（只跑尚未打分的文章）
+    try:
+        run_batch_inference()
+    except Exception as e:
+        logging.warning(f"[BERT] 失敗（不中止 pipeline）：{e}")
+
+    # Step 5：更新 stock_dict + 標記文章中的股票提及
+    try:
+        run_fetch_etf()
+        run_matcher()
+    except Exception as e:
+        logging.warning(f"[Match] 失敗（不中止 pipeline）：{e}")
+
+    # Step 6：DW ETL（建表 → 填維度 → 填事實 → 刷新 Data Mart）
+    run_etl()
+
+    # Step 7：匯出 CSV 給 Looker Studio
+    try:
+        run_looker_export()
+    except Exception as e:
+        logging.warning(f"[Looker] 失敗（不中止 pipeline）：{e}")
+
+    # Step 8：S3 備份（最後一步，備份完整狀態）
+    try:
+        backup_database()
+    except Exception as e:
+        logging.warning(f"[Backup] 失敗（不中止 pipeline）：{e}")
+
+    logging.info("[Pipeline] 全部完成")

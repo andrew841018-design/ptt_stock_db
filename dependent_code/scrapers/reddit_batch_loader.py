@@ -43,16 +43,14 @@ from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
 from scrapers.scraper_schemas import ArticleSchema
-from config import SOURCES, MAX_RETRY
-
-REDDIT_BATCH_SLEEP_INTERVAL = 0.3          # 建議每秒不超過 5 次請求（0.2s per request）
+from config import SOURCES, MAX_RETRY, REQUEST_DELAY
 REDDIT_BATCH_HISTORY_START  = "2005-01-01" # Reddit 創立年份，批量歷史抓取的起點
 
 _SOURCE     = SOURCES["reddit"]
 _API_URL    = "https://arctic-shift.photon-reddit.com/api/posts/search"
 _HEADERS    = {"User-Agent": "ptt-sentiment-bot/1.0"}
 # Reddit batch API 不支援 r/a+b+c 語法，需逐一查詢
-_SUBREDDITS = [s.strip() for s in _SOURCE["subreddits"].split("+")]
+_SUBREDDITS = [sub.strip() for sub in _SOURCE["subreddits"].split("+")]
 _PAGE_LIMIT  = 100   # API 硬性上限，不可超過，非使用者可調參數
 
 
@@ -133,7 +131,7 @@ class RedditBatchLoader(BaseScraper):
                 # 更新進度條
                 pbar.update(1)
                 pbar.set_postfix({"累計": len(articles), "最新日期": datetime.fromtimestamp(last_ts).date()})
-                time.sleep(REDDIT_BATCH_SLEEP_INTERVAL)
+                time.sleep(REQUEST_DELAY)
 
         return articles
 

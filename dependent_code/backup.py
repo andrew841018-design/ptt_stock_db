@@ -44,8 +44,3 @@ def backup_database():
     finally:# 上傳完刪除暫存檔（無論成功失敗都清掉）,finally可以避免上傳失敗而沒刪除暫存檔的情況
         if os.path.exists(dump_path):
             os.remove(dump_path)
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    backup_database()

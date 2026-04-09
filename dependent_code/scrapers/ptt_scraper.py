@@ -10,9 +10,7 @@ from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
 from scrapers.scraper_schemas import ArticleSchema
-from config import SOURCES, MAX_RETRY
-
-PTT_SCRAPE_SLEEP = 0.3  # 文章內頁請求間隔（避免被封鎖）
+from config import SOURCES, MAX_RETRY, REQUEST_DELAY
 SKIP_KEYWORDS = ["公告", "盤後閒聊", "盤中閒聊", "情報"]
 
 _SOURCE = SOURCES["ptt"]  # 只讀一次，避免 dict 到處散落
@@ -173,7 +171,7 @@ class PttScraper(BaseScraper):
             if line.strip():
                 lines.append(line.strip())
 
-        time.sleep(PTT_SCRAPE_SLEEP)
+        time.sleep(REQUEST_DELAY)
         return {"content": "\n".join(lines), "comments": comments}
 
     @staticmethod

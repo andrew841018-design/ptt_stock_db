@@ -110,7 +110,7 @@ class BaseScraper(ABC):
                 cursor.execute(
                     f"SELECT url FROM {ARTICLES_TABLE} WHERE source_id = %s", (source_id,)
                 )
-                return {row[0] for row in cursor.fetchall()}
+                return {url for (url,) in cursor.fetchall()}
 
     def _save_to_db(self, articles: list) -> None:
         source = self.get_source_info()

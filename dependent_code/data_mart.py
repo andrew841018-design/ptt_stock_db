@@ -108,7 +108,7 @@ def get_daily_summary(days: int = 30) -> list[dict]:
                 WHERE summary_date >= CURRENT_DATE - INTERVAL '%s days'
                 ORDER BY summary_date DESC, source_name
             """, (days,))
-            cols = [d[0] for d in cur.description]
+            cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -132,7 +132,7 @@ def get_daily_sentiment(days: int) -> list[dict]:
                 GROUP BY summary_date
                 ORDER BY summary_date DESC
             """, (days,))
-            cols = [d[0] for d in cur.description]
+            cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -150,7 +150,7 @@ def get_hot_stocks_from_mart(min_push: int = 100, limit: int = 20) -> list[dict]
                 ORDER BY push_count DESC
                 LIMIT %s
             """, (min_push, limit))
-            cols = [d[0] for d in cur.description]
+            cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 

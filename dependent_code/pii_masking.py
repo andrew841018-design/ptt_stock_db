@@ -77,7 +77,8 @@ def mask_comments_author() -> int:
     return updated
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """遮蔽 articles + comments 的 author 欄位"""
     a = mask_articles_author()
     c = mask_comments_author()
     logging.info("PII masking 完成：articles %d 筆, comments %d 筆", a, c)
