@@ -9,7 +9,7 @@ class CommentSchema(BaseModel):
     PTT 推文（留言）格式驗證。
     只有 PTT 爬蟲會用到；其他來源的 comments 欄位回傳空 list，不會觸發此 schema。
     """
-    user_id:  str   # 推文者 ID（PTT 帳號）
+    author:   str   # 推文者帳號
     push_tag: str   # 推文類型：推 / 噓 / →（未驗證值域，保持通用性）
     message:  str   # 推文內容
 

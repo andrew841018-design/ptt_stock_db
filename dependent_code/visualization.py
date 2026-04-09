@@ -4,7 +4,9 @@ import datetime
 from keybert import KeyBERT
 from pg_helper import get_pg
 from plt_function import plot_sentiment_trend, plot_push_count_distribution, plot_daily_article_count, plot_sentiment_vs_stock, plot_sentiment_and_price_trend
-from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, TWSE_STOCK_NAME, STOCK_PRICES_TABLE
+from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE
+
+TWSE_STOCK_NAME = "元大台灣50"  # 圖表標題用
 
 
 @st.cache_data

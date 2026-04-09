@@ -4,8 +4,13 @@ import redis
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from api import app, PERIOD_MIN, PERIOD_MAX, ARTICLE_LIMIT_MIN, ARTICLE_LIMIT_MAX, ARTICLE_PERIOD_MIN, ARTICLE_PERIOD_MAX
+from auth import verify_token
 
 client = TestClient(app)
+
+# ── JWT bypass for all tests ──────────────────────────────────────────────────
+# verify_token 是 FastAPI Depends，測試時繞過 DB/JWT，直接回傳固定 dict
+app.dependency_overrides[verify_token] = lambda: {"sub": "testuser", "role": "admin"}
 
 # ===== Mock 資料 =====
 MOCK_DATA = pd.DataFrame({
@@ -30,15 +35,15 @@ STANDARD_CASES = [
 def mock_db_with_data():
     """
     四個 patch 平行生效，同時換掉、同時還原，無階層關係：
-    - get_cache  → None（模擬 MISS，確保走到 DB）
-    - set_cache  → no-op（不實際寫 Redis）
-    - read_sql_query → MOCK_DATA（不查真實 DB）
-    - get_pg     → no-op（不建立真實連線）
+    - get_cache       → None（模擬 MISS，確保走到 DB）
+    - set_cache       → no-op（不實際寫 Redis）
+    - read_sql_query  → MOCK_DATA（不查真實 DB）
+    - get_pg_readonly → no-op（不建立真實連線）
     """
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg"):
+         patch("api.get_pg_readonly"):
         yield
 
 @pytest.fixture
@@ -46,7 +51,7 @@ def mock_db_empty():
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_EMPTY.copy()), \
-         patch("api.get_pg"):
+         patch("api.get_pg_readonly"):
         yield
 
 # ===== Tests =====
@@ -123,7 +128,7 @@ def test_get_search_articles(mock_fixture, expected, request):
     assert response.status_code == 422
 
 def test_health_check():
-    with patch("api.get_pg"):
+    with patch("api.get_pg_readonly"):
         response = client.get("/health")
         assert response.status_code == 200
 
@@ -143,20 +148,20 @@ def test_set_and_get_cache():
 # ===== Cache-Aside Tests =====
 def test_cache_hit():
     """
-    測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg 不被呼叫
+    測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg_readonly 不被呼叫
 
     mock 設定：
-    - api.get_cache → 回傳 MOCK_DATA（模擬 Redis 有資料）
-    - api.get_pg    → 空物件（保險用，確保萬一走錯時不會真的連 DB）
+    - api.get_cache       → 回傳 MOCK_DATA（模擬 Redis 有資料）
+    - api.get_pg_readonly → 空物件（保險用，確保萬一走錯時不會真的連 DB）
 
     flow:
     client.get("/sentiments/today")
     => get_today_sentiment()
     => load_articles_df()
-    => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg 不執行
+    => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg_readonly 不執行
     """
     with patch("api.get_cache", return_value=MOCK_DATA.copy()) as mock_get, \
-         patch("api.get_pg") as mock_db:
+         patch("api.get_pg_readonly") as mock_db:
         response = client.get("/sentiments/today")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查
@@ -168,7 +173,7 @@ def test_cache_miss():
     with patch("api.get_cache", return_value=None) as mock_get, \
          patch("api.set_cache") as mock_set, \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg"):
+         patch("api.get_pg_readonly"):
         response = client.get("/sentiments/today")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查（但 MISS）
@@ -180,6 +185,6 @@ def test_cache_redis_down():
     with patch("cache_helper._redis.get", side_effect=redis.RedisError("Redis 掛了")), \
          patch("cache_helper._redis.setex", side_effect=redis.RedisError("Redis 掛了")), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg"):
+         patch("api.get_pg_readonly"):
         response = client.get("/sentiments/today")
         assert response.status_code == 200  # API 正常回傳，沒有爆

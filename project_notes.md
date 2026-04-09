@@ -1,1459 +1,658 @@
-# PTT 情緒分析專案 — 重點整理
+# Domain Know-How — Data Engineering 重點速查
 
-> 以這個專案為主軸，記錄設計決策、踩過的坑、效能問題與解法
-
----
-
-## 一、Schema 設計
-
-### SQLite（舊）的問題
-- `Push_count` 存成 TEXT，導致排序和計算要額外轉型
-- `Published_Time`、`Article_Sentiment_Score` 是後來 `ALTER TABLE` 加進去的，不在原始建表語法裡
-- **造成的問題**：新環境跑 `Create_DB.py` 建出的 DB 缺欄位，API 直接 KeyError
-
-**教訓**：欄位一開始就要設計好放進建表語法，不要靠 ALTER TABLE 補丁
-
-### PostgreSQL（新）的改進
-- `push_count` 改為 `INTEGER`，`published_at` 改為 `TIMESTAMP`
-- `sentiment_scores` 獨立成一張表，每篇文章對應一筆（article_id FK UNIQUE）
-  - 移除了 `target_type` / `target_id`（原 Polymorphic Association 設計），改用直接 FK 更簡單
-  - 好處：未來換 BERT 模型只要更新 score 欄位，schema 不用改
-- 6 張表：`sources` / `articles` / `comments` / `sentiment_scores` / `stock_prices` / `us_stock_prices`
-- `stock_prices`：只追蹤 0050 一支股票，只留 trade_date / close / change，UNIQUE 在 `trade_date`
-- `us_stock_prices`：只追蹤 VOO 一支 ETF，結構與 stock_prices 相同，資料來源為 yfinance
+> 從 PTT 情緒分析專案提煉的實戰知識。每個概念一眼看懂，面試時能直接用。
+>
+> **更新原則**：本文件是精華整理，不是流水帳。新增知識時維持「概念 → 一句話 → 關鍵要點」格式。
 
 ---
 
-## 二、Index 設計
+## 一、Database
 
-### 為什麼需要 Index
-查詢沒有 index 時，DB 會做全表掃描（Seq Scan），資料量大時非常慢。
+### Schema 設計原則
 
-### 本專案建立的 6 個 Index（全是 B-tree）
+- **一開始就設計好欄位**，不要靠 `ALTER TABLE` 補丁 — 新環境建表會缺欄位
+- **型別要嚴謹**：`push_count` 用 INTEGER 不用 TEXT（排序/計算不需額外轉型）
+- **時間統一用 TIMESTAMP**：PTT 和鉅亨網都是 Unix timestamp（秒），`datetime.fromtimestamp()` 轉換
 
-| Index | 欄位 | 用途 |
-|-------|------|------|
-| `idx_articles_published_at` | `published_at` | 範圍查詢「某段時間的文章」|
-| `idx_articles_source_id` | `source_id` | 等值查詢「特定來源」|
-| `idx_comments_article_id` | `article_id` | JOIN articles 加速 |
-| `idx_sentiment_article_id` | `article_id` | 情緒分數 JOIN articles 加速 |
-| `idx_stock_prices_trade_date` | `trade_date` | 0050 股價日期範圍查詢 |
-| `idx_us_stock_prices_trade_date` | `trade_date` | VOO 股價日期範圍查詢 |
+### NOT NULL 判斷原則
 
-### 各類型 Index 選型原則
+> **沒有這個值，這筆資料有沒有意義？**
 
-| 類型 | 適用場景 | 本專案狀況 |
-|------|---------|-----------|
-| B-tree | 預設，等值＋範圍查詢 | 全部用這個 |
-| Hash | 只做等值查詢 | 不需要，B-tree 夠用 |
-| Composite | 常同時過濾多欄位 | `idx_sentiment_target` |
-| Partial | 只查部分資料（分佈不均）| 未來 `push_count > 100` 可考慮 |
-| Full-text (GIN) | 文字搜尋 | 未來 `/articles/search` 資料量大後需要 |
-| Clustered | 大量資料＋少寫入＋範圍查詢 | Phase 5 的 Fact Table 適合 |
+- 有意義 → 允許 NULL（如 author、push_count）
+- 沒意義 → NOT NULL（如 title、content、url、published_at）
 
-### Index 的代價
-- 加快讀取，但**拖慢寫入**（每次 INSERT/UPDATE 都要更新 index）
-- 本專案 articles 每天新增資料 → B-tree 合適，不用 Clustered
-- 用 `EXPLAIN ANALYZE` 看是 `Index Scan` 還是 `Seq Scan` 來驗證效果
-- 用 `pg_stat_user_indexes` 找從未被使用的 index 刪掉
+### Index 選型
 
----
+| 類型 | 適用場景 | 一句話 |
+|------|---------|--------|
+| **B-tree** | 等值 + 範圍查詢 | 預設選擇，最通用 |
+| **Hash** | 純等值查詢 | 幾乎不用，B-tree 都能做 |
+| **Composite** | 多欄位同時過濾 | 最左前綴原則：篩選力強的欄位放左邊 |
+| **Partial** | 只查部分資料 | `WHERE push_count > 100` 只索引熱門資料，小又快 |
+| **Full-text (GIN)** | 文字搜尋 | 比 `LIKE '%keyword%'` 快 N 倍 |
+| **Clustered** | 大量資料 + 少寫入 + 範圍查詢 | 資料實體排序，DW Fact Table 適合 |
 
-## 三、效能問題
+- **Index 的代價**：加速讀取，拖慢寫入（每次 INSERT/UPDATE 都要更新 index）
+- **驗證**：`EXPLAIN ANALYZE` 看 `Index Scan` vs `Seq Scan`
+- **清理**：`pg_stat_user_indexes` 找從未被使用的 index → 刪掉
 
-### 查詢慢的常見原因（由淺到深）
+### 查詢效能問題排查（由淺到深）
 
-1. **沒有 index** → 全表掃描，資料量大時直接爆
-2. **Index 選錯類型** → 例如範圍查詢用 Hash，完全沒用
-3. **Composite index 欄位順序錯** → 最左前綴原則，篩選力強的欄位要放左邊
-4. **SELECT \*** → 拉太多不需要的欄位，浪費 I/O
-5. **N+1 query** → 迴圈裡每次都查一次 DB，應改成批次 JOIN
-6. **缺少 LIMIT** → 一次回傳全部資料
-7. **沒有 Connection Pool** → 每次 API 請求都建立新連線，overhead 大
+1. 沒有 index → 全表掃描
+2. Index 類型選錯（範圍查詢用了 Hash）
+3. Composite index 欄位順序錯
+4. `SELECT *` 拉太多不需要的欄位
+5. N+1 query → 迴圈裡每次都查 DB，應改成批次 JOIN
+6. 沒有 Connection Pool → 每次建立新連線
 
-### 本專案的效能問題
-- `analysis.py` 每次跑都嘗試 `ALTER TABLE` 加已存在的欄位 → Column already exist ERROR
-  - **解法**：加 `IF NOT EXISTS` 判斷，或一開始就寫進建表語法
-- API Redis 快取已實作（2026-04-01）→ Cache-Aside Pattern，TTL 24小時（86400 秒）
-  - 第一次請求（Cache MISS）：4.11s；第二次（Cache HIT）：0.11s，提升 37 倍
+### GROUP BY 規則
 
----
+- SELECT 裡的欄位：被聚合函式（AVG/SUM/COUNT）包住 → 不放 GROUP BY
+- SELECT 裡的欄位：沒被聚合函式包住 → **全部放 GROUP BY**
+- 只看 SELECT 列出的欄位，跟 table 有多少欄位無關
 
-## 四、路徑問題（踩了很多次）
+**Subquery 模式**：內層做聚合（GROUP BY 只放 key），外層 JOIN 其他表拿剩下欄位 — 讓聚合和 JOIN 各做各的事。
 
-### 相對路徑 vs 絕對路徑
-- **問題根源**：Python script 的相對路徑是以「執行時的工作目錄」為基準，不是以「檔案位置」為基準
-- **標準解法**：
-  ```python
-  import os
-  BASE_DIR = os.path.dirname(__file__)
-  DICT_PATH = os.path.join(BASE_DIR, 'user_dict.txt')
-  ```
+### SQL 速查
 
-### uvicorn vs streamlit 路徑格式不同
-- `uvicorn`：用 Python import 格式（**點號**）→ `uvicorn test_code.api:app`
-- `streamlit`：用檔案路徑格式（**斜線**）→ `streamlit run dependent_code/visualization.py`
+| 語法 | 用途 |
+|------|------|
+| `WHERE` | 分組前過濾原始資料 |
+| `HAVING` | 分組後過濾聚合結果（只能搭配 GROUP BY）|
+| `fetchone()` | 回傳單個 tuple，如 `(42,)` |
+| `fetchall()` | 回傳 list of tuples，無結果回 `[]` |
+| `fetchmany(N)` | 分批讀取，避免記憶體爆（140 萬筆留言用這個）|
+| `ON CONFLICT DO NOTHING` | 衝突時靜默跳過 |
+| `ON CONFLICT DO UPDATE` | 衝突時更新（upsert）|
+| `RETURNING` | INSERT 成功才有回傳；衝突時為空 |
 
-### cd 的副作用
-- shell script 裡 `cd` 會改變整個 script 的工作目錄，影響後續所有指令
-- **解法**：用 `bash -c '...'` 子 shell 隔離，不影響主 script
-  ```bash
-  setsid nohup bash -c 'cd /path/to/dir && streamlit run ...' > /dev/null 2>&1 &
-  ```
+### 並行寫入 Race Condition（TOCTOU）
 
-### cron / launchd 的路徑問題
-- cron / launchd 的工作目錄預設是 `/`，`dirname "$0"` 算出來的 PROJECT_DIR 會錯
-- **解法**：script 裡硬編碼 `PROJECT_DIR`，不靠動態計算
-
----
-
-## 五、CI/CD 部署問題
-
-### SSH Session Timeout
-- **問題**：uvicorn / streamlit 啟動後持續輸出 log，SSH session 不結束，CI/CD 超時
-- **解法**：三個手段合用
-  ```bash
-  setsid nohup uvicorn ... > /dev/null 2>&1 &
-  ```
-  - `setsid`：建立新 session，SSH 斷線不影響
-  - `> /dev/null 2>&1`：丟掉所有輸出
-  - `command_timeout: 30s`：設短 timeout
-
-### pytest 在 CI/CD 沒有真實 DB
-- **問題**：GitHub Actions 沒有 `ptt_stock.db`，API 測試直接炸
-- **解法**：`unittest.mock.patch` 注入假資料
-  ```python
-  with patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()):
-      with patch("api.get_db_connection", return_value=MagicMock()):
-  ```
-
-### SSH Key 格式問題
-- GitHub Secret 要貼完整 PEM 內容，包含頭尾 `-----BEGIN/END RSA PRIVATE KEY-----`
-
----
-
-## 六、重構原則（實際應用）
-
-### config.py — 集中管理常數
-- 把 DB_PATH、TABLE 名稱、SKIP_KEYWORDS 等全部移到 `config.py`
-- SQL 語法裡用常數取代 hardcoded 字串，改表名只要改一個地方
-
-### db_helper.py — Context Manager 管理連線
-```python
-@contextmanager
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        yield conn
-    finally:
-        conn.close()  # 不管有沒有 exception 都會關
 ```
-- 解決 connection leak 問題
-
-### Lazy Load — sentiment.py
-- 詞庫只在第一次呼叫 `calculate_sentiment()` 時才載入
-- 避免 import 時就佔用記憶體
-
-### 循環 import 的解法
-- `data_cleanner.py` import `analysis.py`，`analysis.py` 又 import `data_cleanner.py` → 循環 import
-- **解法**：把共用函式移到正確的模組，讓依賴方向單向
-
----
-
-## 七、macOS 自動排程
-
-### cron 在 macOS Sequoia 的問題
-- `launchctl load com.vix.cron.plist` 失敗（Input/output error）
-- 系統限制，cron daemon 無法在新版 macOS 啟動
-
-### 改用 launchd（Apple 官方推薦）
-- plist 放在 `~/Library/LaunchAgents/`，用 `launchctl load` 載入
-- 排錯過程：
-  1. **第一個錯誤**：`Operation not permitted` → launchd 無法存取 Desktop（TCC 限制）
-     - 解法：把 script 複製到 `~/scripts/`，Desktop 路徑不再被存取
-  2. **第二個錯誤**：`line 7: root: command not found` + log 路徑變成 `/logs/...`
-     - 原因：launchd 預設 CWD 是 `/`，`dirname "$0"` 算出 `.`，`cd ./..` 得到 `/`，PROJECT_DIR 變空
-     - 解法：script 裡硬編碼 `PROJECT_DIR="/Users/andrew/Desktop/..."`，不靠動態計算
-- plist 設定範例：
-  ```xml
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>/Users/andrew/scripts/run_etl.sh</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>10</integer>
-    <key>Minute</key><integer>25</integer>
-  </dict>
-  ```
-
----
-
-## 八、資料品質
-
-### Great Expectations
-- 驗證欄位型別、值範圍、非空值等
-- cron 環境下 import 路徑要用 try/except 同時支援本地和 `/tmp` 環境
-
-### Incremental Loading
-- 爬蟲用 URL 做 UNIQUE 去重，已存在的文章跳過
-- 避免每次全量重爬、重複寫入
-
-### QA.py — Pipeline 內建資料品質檢查
-
-Data Engineering 的 QA ≠ 手動點按鈕，而是在 pipeline 裡埋自動檢查點：
-
-| 檢查項目 | SQL | assert 條件 |
-|---------|-----|------------|
-| 無重複 URL | `GROUP BY url HAVING COUNT(*) > 1` | `not duplicate_urls` |
-| 無孤兒推文 | `WHERE article_id NOT IN (SELECT article_id FROM articles)` | `orphan_count == 0` |
-| articles 不為空 | `SELECT COUNT(*) FROM articles` | `article_count > 0` |
-
-**assert vs warning 的差別：**
-- `logging.warning` — 資料有問題，pipeline 繼續跑 → 錯誤資料進下游
-- `assert` — 資料有問題，拋 `AssertionError` 中止 → 強迫處理
-
-**QA.py 架構：**
-```python
-def QA_checks():        # ← 被 pipeline.py import 呼叫
-    ...
-
-if __name__ == "__main__":  # ← 也可以單獨 python QA.py 執行
-    QA_checks()
+❌ SELECT 檢查不存在 → INSERT（兩個 thread 同時通過 SELECT → 第二個 crash）
+✅ INSERT ON CONFLICT DO NOTHING → fallback SELECT（讓 DB 自己處理衝突）
 ```
 
-### HAVING vs WHERE
+---
+
+## 二、Data Architecture
+
+### OLTP vs OLAP（DW）
+
+| | OLTP | OLAP（Data Warehouse）|
+|---|---|---|
+| 優化目標 | 寫入（INSERT/UPDATE）| 讀取 + 分析（SELECT + 聚合）|
+| 設計 | 正規化（減少冗餘）| 反正規化（冗餘換速度）|
+| 本專案 | articles / comments / sentiment_scores | fact_sentiment / dim_* |
+
+### Star Schema
+
+```
+         dim_date
+            ↑
+dim_source → fact_sentiment ← dim_stock
+```
+
+- **Fact Table**：每日每來源的聚合值（article_count, avg_sentiment, avg_push_count）
+- **Dimension Table**：描述性維度（日期、來源、股票）
+- **Snowflake**：Dimension 再正規化（dim_source → dim_market），查詢多一層 JOIN 但更乾淨
+
+### Denormalization（反正規化）
+
+DW 把 `source_name` 直接冗餘放進 Fact Table — 查詢時不用 JOIN dim_source。
+OLTP 不能這樣做（冗餘 = 更新異常），但 DW 是「讀多寫少」，這是正確做法。
+
+### date_id 用整數 YYYYMMDD
+
+- 數值比對比 DATE 型別快（B-tree 掃描、BETWEEN）
+- 一眼看出日期，可讀性高
+- 需另存 `full_date` 做日期運算
+
+### Data Mart
+
+- **本質**：DW 的子集，針對特定用途（儀表板 / API）建立的 table
+- **刷新方式**：TRUNCATE + INSERT（明確的 SQL，可移植到任何 DB）
+- **vs Materialized View**：MV 是 PostgreSQL 特有物件，Data Mart 是架構概念，104 JD 常見
+
+### Data Lake
+
+- **本質**：原始資料的中央存儲，保留原始格式，支援各種檔案類型（JSON、CSV、Parquet...）
+- **三層架構**：`raw/`（原始資料）→ `processed/`（清洗後 Parquet）→ `curated/`（聚合結果）
+- **本專案**：用 MongoDB raw_responses 取代（600k 資料不需要 S3 三層架構）
+
+### Parquet 格式
+
+- **Columnar**：查詢只讀需要的欄位，不掃全部資料
+- **壓縮**：同樣資料比 JSON 小 5-10x（Snappy 壓縮）
+- **型別保留**：int / float / datetime 原生支持（JSON 全是字串）
+- **生態系**：pandas、Spark、BigQuery、Athena 都原生支持
+
+### ETL 流程設計
+
+```
+Extract（爬蟲並行抓取）→ Transform（QA + 修復）→ Load（寫入 PG）→ DW ETL → Data Mart 刷新
+```
+
+- 所有 INSERT 都用 `ON CONFLICT`，幂等可重複執行
+- Incremental Loading：用 URL UNIQUE 去重，已存在的跳過
+
+### CLUSTER（實體排序）
 
 ```sql
--- WHERE：分組前過濾原始資料
-SELECT url FROM articles WHERE push_count > 10
-
--- HAVING：分組後過濾聚合結果
-SELECT url, COUNT(*) FROM articles GROUP BY url HAVING COUNT(*) > 1
+CLUSTER fact_sentiment USING idx_fact_date;
 ```
 
-`HAVING` 只能用在有 `GROUP BY` 的查詢，用來過濾 `COUNT`、`SUM` 等聚合函式的結果。
-
-### fetchone vs fetchall
-
-```python
-cursor.execute("SELECT COUNT(*) FROM articles")
-cursor.fetchone()     # → (42,)      單個 tuple
-cursor.fetchone()[0]  # → 42         取第一個欄位值
-
-cursor.execute("SELECT url, COUNT(*) FROM articles GROUP BY url HAVING COUNT(*) > 1")
-cursor.fetchall()     # → [("https://...", 2), ("https://...", 3)]   list of tuples
-                      # 無結果時 → []
-```
-
-### assert 語法
-
-```python
-# 正確：assert 是關鍵字，不是函式
-assert orphan_count == 0, f"孤兒推文 {orphan_count} 筆"
-
-# 陷阱：加括號變成 tuple，永遠是 truthy，永遠不會 fail
-assert(orphan_count == 0, "孤兒推文")  # ← 永遠通過！
-```
+資料實體上按 date_id 排序 → 範圍查詢只讀連續磁碟頁。會鎖表（ACCESS EXCLUSIVE LOCK），只在離峰執行。
 
 ---
 
-## 九、Logging
+## 三、Data Quality
 
-### logging vs print
+### 三層驗證架構
 
-| | print | logging |
-|---|---|---|
-| 輸出格式 | 只有訊息本身 | 時間 + 等級 + 訊息 |
-| 等級控制 | 無 | DEBUG / INFO / WARNING / ERROR |
-| 適合場景 | 快速測試 | 正式程式碼 |
+```
+爬蟲入庫前               DB 入庫後              API 回傳前
+scraper_schemas.py      QA.py / GE            api.py response_model
+（格式對不對）          （資料品質）           （輸出格式）
+```
 
-### basicConfig — 設定怎麼印
+三層目的不同，互不重疊。
+
+### Pydantic Validator 判斷原則
+
+> **DB 的 NOT NULL / 型別約束擋不住的東西，才需要 Pydantic validator 補上。**
+
+- `title`：NOT NULL 擋不住空字串 `""` → 需要 `title_not_empty`
+- `url`：型別對但格式可能錯 → 需要 regex 驗證
+- `push_count`：無 CHECK constraint → 需要 `-100 ≤ n ≤ 100` 範圍檢查
+- `content`：NOT NULL 已夠 → 不需要額外 validator
+
+### Schema Validator 反模式
 
 ```python
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+# ❌ 反模式：上游加 fallback 繞過 validator
+article = {"title": title or url}    # 空 title 被 url 頂替，validator 收到非空值
+
+# ✅ 正確：直接傳，讓 validator 決定
+article = {"title": title}           # 空 → validator 攔截 → return None
 ```
 
-| 佔位符 | 輸出內容 |
-|--------|---------|
-| `%(asctime)s` | 時間戳記，格式：`2026-03-26 10:00:00,毫秒` |
-| `%(levelname)s` | `INFO` / `WARNING` / `ERROR` |
-| `%(name)s` | logger 名稱（需手動加入 format 才會印出） |
-| `%(message)s` | `logger.info("這裡的內容")` |
+**Validator 是唯一的資料品質把關點**，不要在上游加 fallback 繞過它。
 
-### getLogger — 設定誰來印
+### QA.py 檢查模式
 
-```python
-logger = logging.getLogger(__name__)
-```
+| 檢查項目 | 方法 | 失敗行為 |
+|---------|------|---------|
+| 無重複 URL | `GROUP BY url HAVING COUNT(*) > 1` | raise ValueError 中止 pipeline |
+| 無孤兒推文 | `WHERE article_id NOT IN (SELECT ...)` | raise ValueError |
+| 資料不為空 | `SELECT COUNT(*)` | raise ValueError |
 
-- `__name__` = 當前檔案的模組名稱（e.g. `migrate.py` → `"migrate"`）
-- 幫這個模組的 log 在系統內部標記名字
-- 兩個實際用途：
-  1. 在 format 加 `%(name)s`，印出是哪個模組發出的訊息
-  2. 針對單一模組單獨設定等級：`logging.getLogger("migrate").setLevel(logging.ERROR)`
-- `basicConfig` 是全域設定；`getLogger` 讓你針對單一模組獨立設定
-- 目前專案用不到，但是業界標準寫法，預留彈性
+- `assert` 中止 pipeline、`logging.warning` 繼續跑 — 資料品質問題必須用 assert（或 raise）
+- `assert(x, msg)` 是 tuple（永遠 truthy），正確寫法：`assert x, msg`
 
-### 分工
+### Great Expectations
 
-```
-logger.info("開始遷移")    ← 你決定印什麼內容
-basicConfig(format=...)    ← 決定格式長什麼樣
-```
-
-### f-string vs 佔位符
-
-```python
-# f-string
-logging.info(f"第 {expensive_function()} 筆")
-# 執行順序：expensive_function() 先跑 → 組合字串 → 判斷等級，不印就丟掉
-
-# 佔位符
-logging.info("第 %s 筆", expensive_function())
-# 執行順序：先判斷等級 → 等級不夠就直接停，expensive_function() 完全不跑
-```
-
-> f-string 是「做了再決定印不印」，佔位符是「先決定印不印，不印就什麼都不做」。
-
-- 實際好處：針對 `DEBUG` 等級，上線後改成 `INFO`，佔位符連字串都不組合，省效能
-- 目前專案只用 INFO / WARNING / ERROR，沒有 DEBUG，兩種寫法沒有實質差別
-
-### .env 與環境變數的陷阱
-
-```bash
-# .env 裡空值會覆蓋 os.environ.get() 的預設值
-PG_HOST=        # ← 讀進來是空字串 ""，不是 None
-PG_PORT=        # ← os.environ.get("PG_HOST", "localhost") 拿到 ""，不是 "localhost"
-```
-
-- `os.environ.get("KEY", "default")` 只有在找**不到**這個 KEY 時才用預設值
-- `.env` 裡設了空值 = 找得到，但值是 `""`，預設值完全不起作用
-- psycopg2 拿到空字串的 `host`，改走 Unix socket（`/tmp/.s.PGSQL.5432`），連線失敗
-
-**解法**：`.env` 裡要嘛填入正確值，要嘛直接刪掉該行：
-```bash
-PG_HOST=localhost   # ✅ 填入值
-PG_PORT=5432        # ✅ 填入值
-# 或直接刪掉這兩行，讓 os.environ.get() 用預設值
-```
-
-### rollback + raise 模式
-
-```python
-except psycopg2.Error as e:
-    logging.error("Failed: %s", e)
-    if conn:
-        conn.rollback()  # 撤銷這次所有操作，資料庫回到操作前的狀態
-    raise                # 把例外往上拋，讓呼叫者知道出錯了
-```
-
-- `rollback`：確保資料庫乾淨，不留半殘的表或髒資料
-- `raise`：確保你看到錯誤訊息，知道哪裡出問題
-- 結果：什麼都沒做，但知道錯在哪 → 像交易沒完成就取消
+- `mostly=0.99`：容忍 1% 的例外（如 `change` 第一筆必為 NULL）
+- 絕對不能有 NULL 的欄位不加 `mostly`（等同 `mostly=1.0`）
 
 ---
 
----
-
-## 十、Exception 處理模式
-
-### raise vs try/except
-
-```
-raise     → 製造 / 往上傳遞例外
-try/except → 接住例外
-```
-
-### 分層處理原則
-
-```
-底層函式    → raise（我不管，往上丟）
-中層函式    → except + 處理 + raise（rollback 等，但還是往上丟）
-最上層      → except + logging（收尾，不再 raise）
-```
-
-專案範例：
-```
-scrape_article()   → raise
-pg_helper.get_pg() → rollback + raise
-pipeline.py        → logging.error → 程式結束
-```
-
-最上層不 raise 的原因：再拋就是 unhandled exception，Python 直接印 traceback 死掉，不如自己用 logging 收尾乾淨。
-
-### str(e) vs raise
-
-```python
-# str(e) — 只記錄訊息，繼續執行（錯誤是預期內的）
-except Exception as e:
-    logging.error(f"爬取失敗：{str(e)}")
-
-# raise — 往上拋，中止執行（錯誤是嚴重的）
-except Exception as e:
-    conn.rollback()
-    raise
-```
-
----
-
----
-
-## 十二、Redis 快取（Cache-Aside Pattern）
-
-### 為什麼需要快取
-每次 API 請求都打 DB，DB 是磁碟 I/O，速度慢（本專案測到 4.11s）。Redis 是 in-memory key-value store，同樣的資料第二次只要 0.11s（37 倍提升）。
+## 四、Redis Cache
 
 ### Cache-Aside Pattern（旁路快取）
 
 ```
-API 收到請求
-  ↓
-先查 Redis（get_cache）
-  ├─ HIT  → 直接回傳（不打 DB）
-  └─ MISS → 查 DB → 存進 Redis（set_cache）→ 回傳
+API 請求 → 查 Redis → HIT → 直接回傳
+                     → MISS → 查 DB → 存 Redis → 回傳
 ```
 
-由「應用層」控制快取，Redis 不主動同步，DB 是唯一的資料來源（source of truth）。
-
-### 本專案實作
-
-| 檔案 | 改動 |
-|------|------|
-| `cache_helper.py` | `get_cache(key)` / `set_cache(key, df, ttl)`；含 `RedisError` 保護，Redis 掛掉不影響 API |
-| `api.py` | `load_articles_df()` 改用 Cache-Aside |
-| `config.py` | 新增 `REDIS_HOST` / `REDIS_PORT` / `REDIS_TTL`（86400 = 24小時）|
-| `requirements.txt` | 補上 `redis` |
+- Redis 是快取不是資料庫，DB 是 source of truth
+- 本專案效果：4.11s → 0.11s（37 倍提升）
 
 ### 關鍵概念
 
-**TTL（Time To Live）**
-```python
-r.setex(key, ttl, value)   # SET + EXpire 合一，到期 Redis 自動刪除
-```
-
-**`orient='table'` 保留 dtype**
-```python
-# 序列化（存入 Redis）
-df.to_json(orient='table')      # 保留 int/float/datetime 型別資訊
-
-# 反序列化（從 Redis 讀出）
-pd.read_json(StringIO(cached), orient='table')  # 正確還原型別
-```
-不用 `orient='table'` 的話：int 欄位可能變 float，datetime 欄位可能變 str。
-
-**`StringIO` — 字串變 file-like object**
-```python
-from io import StringIO
-pd.read_json(StringIO(json_string))  # pd.read_json 需要 file-like object
-```
-
-**RedisError 保護**
-```python
-try:
-    cached = r.get(key)
-except redis.RedisError:
-    return None   # Redis 掛掉就當作 MISS，繼續查 DB
-```
-Redis 是快取不是資料庫，掛掉應降級（fallback）到 DB，不應讓 API 整個死掉。
+| 概念 | 說明 |
+|------|------|
+| `setex(key, ttl, value)` | SET + EXpire 合一，到期自動刪除 |
+| `orient='table'` | DataFrame 序列化保留 dtype（不然 int 變 float、datetime 變 str）|
+| `StringIO` | 字串變 file-like object，`pd.read_json()` 需要 |
+| RedisError 保護 | Redis 掛 → 降級到 DB，不讓 API 死掉 |
 
 ### 測試策略
 
-| 測試 | 說明 |
-|------|------|
-| `test_cache_hit` | Redis 有資料 → `get_cache` 直接回傳，DB 不被呼叫 |
-| `test_cache_miss` | Redis 沒資料 → 查 DB → `set_cache` 被呼叫 |
-| `test_cache_redis_down` | `get_cache` 拋 RedisError → 降級查 DB，API 正常回傳 |
-| `test_set_and_get_cache` | 真實 Redis 存取驗證（需 Redis 服務在線）|
-
-**patch 命名空間原則**
-```python
-# 要 patch「使用者的命名空間」，不是「定義者的命名空間」
-patch("api.get_cache")        # ✅ api.py 裡的 get_cache
-patch("cache_helper.get_cache")  # ✗ api.py 不認得這個名字
-```
-
-**平行 patch 語法（Python 3.x）**
-```python
-# 平行（推薦，較清楚）
-with patch("api.get_cache", ...), patch("api.set_cache", ...):
-    ...
-
-# 嵌套（效果相同，縮排多）
-with patch("api.get_cache", ...):
-    with patch("api.set_cache", ...):
-        ...
-```
-
-**`side_effect` vs `return_value`**
-```python
-mock.return_value = None          # 每次呼叫都回傳 None
-mock.side_effect = RedisError()   # 呼叫時拋出例外
-mock.side_effect = lambda k: ...  # 呼叫時執行自訂函式
-```
-
-### Docker 基礎設施
-
-```bash
-# 啟動 Redis 容器
-docker run -d --name redis_cache -p 6379:6379 --restart=always redis:7
-
-# 設為開機自動啟動（需搭配 Docker Desktop 開機啟動）
-docker update --restart=always redis_cache
-```
-
-**GitHub Actions CI/CD（deploy.yml）**
-```yaml
-services:
-  redis:
-    image: redis:7
-    ports:
-      - 6379:6379
-```
-讓 CI/CD 環境也能跑需要真實 Redis 的測試。
-
-*最後更新：2026-04-03*
+- patch 命名空間原則：patch「使用者的命名空間」→ `patch("api.get_cache")` ✅
+- `return_value`：固定回傳值；`side_effect`：拋例外或執行自訂函式
 
 ---
 
----
+## 五、API Design
 
-## 十九、Pydantic 資料驗證
+### REST 原則
 
-### 三個驗證層，互不重疊
+- 資源導向：`/articles`（複數名詞），不用 `/getArticles`
+- HTTP 語意：GET（讀）、POST（建）、PUT（全更新）、PATCH（部分更新）、DELETE
+- 統一錯誤格式：`{"error": True, "code": "NOT_FOUND", "message": "..."}`
 
-```
-爬蟲                         DB                         使用者
-  │                           │                           │
-  ▼                           ▼                           ▼
-scraper_schemas.py       QA.py / GE          api.py response model
-（資料進來前）           （資料進 DB 後）      （資料出去前）
-```
+### Pydantic response_model 三件事
 
-| 層 | 位置 | 時間點 | 驗證什麼 |
-|---|---|---|---|
-| 爬蟲入庫前 | `scraper_schemas.py` | 爬到 → DB | 格式對不對（title 非空、url regex、push_count 範圍）|
-| DB 入庫後 | `QA.py` / `ge_validation.py` | DB 存進去後 | 資料品質（無重複 URL、無孤兒推文、NULL 檢查）|
-| API 回傳前 | `api.py` response model | DB 讀出 → 回傳 | 回傳格式對不對、過濾多餘欄位 |
-
-三層目的不同，不重疊。
-
-### scraper_schemas.py — 爬蟲入庫驗證
-
-```python
-class ArticleSchema(BaseModel):
-    title:        str
-    url:          str
-    push_count:   int | None
-    published_at: datetime
-    ...
-
-    @field_validator("title")
-    @classmethod
-    def title_not_empty(cls, title):
-        if not title.strip():
-            raise ValueError("title cannot be empty")
-        return title
-```
-
-使用方式：
-```python
-try:
-    ArticleSchema(**article)   # 驗證通過才回傳
-except Exception as e:
-    logging.warning(f"驗證失敗，略過：{e}")
-    return None
-```
-
-驗證失敗 `return None` 而非 `raise`，讓 for loop 跳過這篇繼續爬下一篇。
-
-### 哪些欄位需要 validator？原則說明
-
-| 欄位 | DB 能擋嗎？ | 為什麼需要 Pydantic validator |
-|------|------------|-------------------------------|
-| `title` | ❌ `NOT NULL` 擋不住空字串 `""` | `title_not_empty`：`title.strip()` 不為空才算有效 |
-| `url` | ❌ 只有型別，不驗格式 | `url_must_be_valid`：確保是 `https?://` 開頭，格式正確 |
-| `push_count` | ❌ 無 CHECK constraint | `push_count_in_range`：確保 -100 ≤ n ≤ 100，與 PTT 規格一致 |
-| `published_at` | ❌ TIMESTAMP 不會拒絕未來時間 | `published_at_not_future`：爬蟲解析錯誤時間時能被抓到 |
-| `content` | ✅ NOT NULL 已足夠 | 不需要額外 validator |
-| `author` | ✅ 允許 NULL，型別對就好 | 不需要額外 validator |
-| `comments` | ✅ 空 list 合法，逐筆由 CommentSchema 驗 | 不需要額外 validator |
-
-原則：**DB 的 NOT NULL / 型別約束擋不住的東西（空字串、格式、範圍、未來時間），才需要 Pydantic validator 補上。**
-
-### API Response Models
-
-每個 endpoint 對應一個 model：
-
-| Endpoint | Model |
-|----------|-------|
-| `/sentiments/today` | `TodaySentimentResponse` |
-| `/sentiments/change` | `ChangeSentimentResponse` |
-| `/sentiments/recent` | `RecentSentimentResponse` |
-| `/articles/top_push` | `TopPushResponse` + `TopPushArticleItem` |
-| `/articles/search` | `SearchResponse` + `SearchArticleItem` |
-| `/correlation/0050` | `SentimentVsStockPriceResponse` + `SentimentVsStockPriceItem` |
-| `/health` | `HealthResponse` |
-
-### 關鍵概念
-
-**`response_model=` 做三件事**
-1. 型別驗證（回傳錯誤型別會被抓到）
-2. 過濾多餘欄位（防止 DB 內部欄位外洩）
+1. 型別驗證（回傳錯型別被抓到）
+2. 過濾多餘欄位（防 DB 內部欄位外洩）
 3. 自動產生 Swagger 文件
 
-**`list[X]` vs `list`**
-- `list` = 裡面可以裝任何東西，Pydantic 不管
-- `list[X]` = 裡面每個元素都要符合 X，逐一驗證
+### 常見 Bug
 
-**`@field_validator("欄位名")`**
-- 告訴 Pydantic「這個函式負責驗證這個欄位」
-- 不加裝飾器 = 普通 classmethod，建立 model 時不會觸發
-- `@classmethod` 是 Pydantic v2 規定，`cls` 固定在第一個參數但實際用不到
-
-**動態 key 的問題**
-```python
-# 避免這樣：key 隨參數變動，Pydantic 無法靜態定義 model
-return {f"recent_{period}_days_sentiment_score": score}
-
-# 改為固定 key：
-return {"period": period, "sentiment_score": score}
-```
-
-### 常見 Bug 紀錄
-
-**shared DataFrame in-place mutation**
-```python
-# 危險：df 來自快取，in-place 改動會污染後續所有呼叫
-df['Published_Time'] = df['Published_Time'].dt.date
-
-# 正確：先 copy 再改
-df = df.copy()
-df['Published_Time'] = df['Published_Time'].dt.date
-```
-快取物件是共享的，不 copy 就直接改，所有用到同一物件的地方都會看到被改過的版本。
-
-**PTT X 前綴推文數計算錯誤**
-```python
-# 錯誤：X1 → -1
-return -int(text[1:])
-
-# 正確：X1 → -10（PTT 規格：X1=10 噓，X9=90 噓）
-return -int(text[1:]) * 10
-```
-
-**dict 直接 key 存取 vs .get()**
-```python
-item["publishAt"]        # publishAt 缺失 → KeyError，繞過上層 try/except
-item.get("publishAt")    # 缺失 → None，可以加 early return 優雅處理
-```
-在爬蟲 article dict 建構期間拋出的例外，不在 ArticleSchema(**article) 的 try/except 範圍內，會向上傳播。
+- **共享 DataFrame in-place mutation**：快取物件是共用的，不 `.copy()` 就改 → 污染所有後續呼叫
+- **dict `item["key"]` vs `item.get("key")`**：前者缺失 → KeyError 可能繞過上層 try/except
+- **HTTP 200 with Error Body**：Arctic Shift API 永遠回 200，錯誤在 JSON body 裡 — 不能只靠 `raise_for_status()`
 
 ---
 
-## 十八、資料品質設計原則（QA）
+## 六、MongoDB
 
-### Schema 層 vs Application 層的分工
+### PostgreSQL vs MongoDB
 
-| 層 | 工具 | 負責範圍 |
+| | PostgreSQL | MongoDB |
 |---|---|---|
-| Schema 層 | `NOT NULL`、`UNIQUE`、`FK` | DB 強制，任何來源都不能繞過 |
-| Application 層 | `QA.py` | 跨表邏輯、來源專屬規則、數量檢查 |
+| Schema | 嚴格，欄位事先定義 | 彈性，每筆 document 可不同結構 |
+| 適用 | 結構化分析、JOIN、聚合 | 原始資料保留、半結構化 |
+| 本專案 | OLTP + DW | raw_responses（HTTP 原文存檔）|
 
-兩層互補：Schema 負責「欄位層級」的硬約束，QA 負責「業務邏輯層級」的軟檢查。
+### raw_responses 的價值
 
-### 哪些欄位該 NOT NULL
+- 存 HTTP 原文（HTML / JSON），不是解析後的資料
+- Parser 有 bug → 修完 bug 後直接 re-parse，不需重新爬取
+- 三種來源結構天生不同（PTT=HTML、鉅亨/Reddit=JSON）→ schema-less 完美適合
 
-判斷原則：**沒有這個值，這筆資料有沒有意義？**
-
-| 表 | NOT NULL 欄位 | 允許 NULL 欄位 |
-|---|---|---|
-| articles | title、content、url、published_at、source_id | author、push_count |
-| comments | user_id、push_tag、message、article_id | — |
-| sentiment_scores | score、article_id | — |
-| stock_prices | trade_date | open、high、low、close、change |
-
-### 來源專屬檢查
-
-不同來源對同一欄位有不同規範，透過 JOIN sources 表篩出來單獨檢查：
+### Graceful Degradation 模式
 
 ```python
-cursor.execute(f"""
-    SELECT COUNT(*) FROM articles a
-    JOIN sources s ON s.source_id = a.source_id
-    WHERE s.source_name = 'PTT Stock' AND a.push_count IS NULL
-""")
+_MONGO_OK = True   # MongoDB 可用旗標
+# MongoDB 掛 → _MONGO_OK = False → 靜默跳過 → 不影響主流程（PostgreSQL 寫入）
 ```
 
-### published_at 單位一致性
+**原則**：附加功能掛掉不能影響核心流程。
 
-| 來源 | 格式 | 轉換方式 |
-|---|---|---|
-| PTT | Unix timestamp（秒），從 URL 抽取 | `datetime.fromtimestamp(int(...))` |
-| 鉅亨網 | Unix timestamp（秒），API `publishAt` 欄位 | `datetime.fromtimestamp(item["publishAt"])` |
+### BSON 16MB 限制
 
-兩個來源單位相同，存進 DB 都是 `TIMESTAMP`，不需要額外轉換。
+MongoDB 單個 document（含查詢 command）不能超過 16MB。
+`$in` 查詢放 56 萬筆 URL → 超過限制 → **分批查詢**（每批 500 個 URL）。
+
+### Upsert 模式
+
+```python
+db["raw_articles"].update_one({"url": url}, {"$set": doc}, upsert=True)
+```
+
+以 url 為唯一鍵，重複跑不產生重複資料。
 
 ---
 
-## 十三、遷移腳本（SQLite → PostgreSQL）
+## 七、Data Repair Pipeline
 
-### 為什麼需要遷移腳本
+### 修復流程
 
-SQLite 是單機輕量 DB，適合開發期快速迭代。PostgreSQL 支援多連線、更嚴謹的型別、FK 約束、Index 優化，適合正式環境。遷移腳本把歷史資料從 SQLite 搬進 PostgreSQL 的正規化 Schema。
-
-### 核心挑戰
-
-**1. id 不連續問題**
-SQLite `Article_id` 是自增的，PostgreSQL `article_id`（SERIAL）從 1 開始獨立計算。兩邊 id 不同，留言的 `article_id` FK 會對不上。
-
-**解法**：建立 `id_map: Dict[sqlite_id, pg_id]`，用 URL 當橋梁：
-```python
-# 插入文章後用 RETURNING 拿到 PG article_id
-INSERT INTO articles (...) VALUES (...) ON CONFLICT (url) DO NOTHING RETURNING article_id
-# 已存在就用 url 查
-SELECT article_id FROM articles WHERE url = %s
+```
+QA_checks() 失敗 → repair() → diagnose() 掃壞資料 → 分類來源
+  → MongoDB raw re-parse → UPDATE PG（只更新非 None 欄位）→ 重跑 QA
 ```
 
-**2. 型別轉換**
-```python
-def _to_int(value) -> int:
-    try: return int(value)       # "27" → 27
-    except: return 0             # 意外值 → 0，不中斷遷移
+### 設計要點
 
-def _to_ts(value) -> Optional[datetime]:
-    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")  # TEXT → TIMESTAMP
-```
-
-**3. 記憶體管理（140 萬筆留言）**
-```python
-# 不要 fetchall()，改用 fetchmany() 分批讀
-while True:
-    rows = sqlite_cur.fetchmany(BATCH_SIZE)  # 每次 5000 筆
-    if not rows: break
-    # 處理並寫入...
-```
-
-**4. batch 內 dedup**
-同一篇文章可能有多則內容相同的推文（e.g. 很多人推「好」），用 `(push_tag, message)` 找 PG comment_id 時會命中同一筆，導致 batch 裡有重複的 `(target_type, target_id, method)`，ON CONFLICT DO UPDATE 報 CardinalityViolation。
-
-```python
-# dict comprehension 去重：相同 key 只保留最後一個 value
-deduped = list({(t, tid, m): (t, tid, m, s) for t, tid, m, s in batch}.values())
-```
-
-### 冪等設計
-
-遷移腳本可安全重複執行：
-```python
-pg_cur.execute("SELECT COUNT(*) FROM articles")
-if pg_cur.fetchone()[0] == 0:
-    # 第一次跑：插入文章 + 留言
-else:
-    # 已有資料：只重建 id_map，不重複插入
-    id_map = _build_id_map_from_pg(sqlite_cur, pg_cur)
-```
-
-`sentiment_scores` 用 `ON CONFLICT DO UPDATE`，重跑會更新分數而非重複插入。
-
-### 最終遷移結果
-
-| 表 | 筆數 |
-|---|---|
-| sources | 1 |
-| articles | 30,395 |
-| comments | 4,492,615 |
-| sentiment_scores | 3,100,896 |
+- **diagnose()**：掃 PG 找 NULL 的 title/content/push_count/published_at
+- **UPDATE 只更新非 None**：re-parse 可能某些欄位取不到，不應覆蓋 DB 已有的好值
+- **pipeline 整合**：QA 失敗 → catch → repair → 重跑 QA → 仍失敗才真正中止
 
 ---
 
-## 十四、情緒分析加權設計（push_tag_bonus）
+## 八、ML / NLP
 
-### 設計
+### BERT 情緒分析
+
+| 項目 | 值 |
+|------|-----|
+| Base model | `bert-base-chinese` |
+| Labels | 3（negative / neutral / positive）|
+| Score 計算 | `P(positive) - P(negative)`，範圍 [-1, +1] |
+| 最少標注量 | 50 筆才 fine-tune（避免 overfitting）|
+| Zero-shot fallback | 未 fine-tune 時用預訓練模型（不準但有值）|
+| 批次推論 | `LEFT JOIN WHERE IS NULL` + 每批獨立 commit，中途斷可接續 |
+
+### NER（命名實體識別）
+
+- **策略一**：Regex 抓代號 → 比對 `stock_dict.json`（避免隨機數字誤判）
+- **策略二**：最長匹配抓公司名（「台灣積體電路」先於「台積」）
+- **ner_done 表**：追蹤已處理文章，避免無提及股票的文章被無限重複處理
+
+### 回測系統（Walk-Forward Validation）
+
+- **為什麼不用 Random Split**：時間序列 random split 會偷看未來（data leakage）
+- **Walk-Forward**：Train=[歷史] → Test=[下一季]，訓練集逐步擴展
+- **所有 lag/rolling 特徵都 shift(1)**：用昨日資料預測今日，避免 leakage
+- **策略報酬**：預測漲 → 進場；預測跌 → 不進場。對照 Buy-and-Hold 計算超額報酬
+
+### 情緒分析加權（push_tag_bonus）
 
 ```python
-_PUSH_TAG_BONUS = {"推": 0.3, "噓": -0.3}
-score = max(-1.0, min(1.0, text_score + tag_bonus))  # clamp [-1, 1]
+score = text_score + tag_bonus   # 推 +0.3 / 噓 -0.3，clamp [-1, +1]
 ```
 
-### 為什麼是 0.3
+0.3 是 heuristic，嚴謹做法要用標注資料跑實驗找最佳值。
 
-**老實說：沒有統計依據，是 heuristic。**
+### KeyBERT vs Regex 斷詞
 
-設計邏輯：
-- 推/噓是明確的情緒訊號，應影響分數
-- 但不能讓推噓完全主導文字分析（所以不用 0.5 或 1.0）
-- 0.3 ≈ 整體範圍的 30%，「有影響但不主導」
-
-**面試標準回答：**
-> 「0.3 是初步的 heuristic，嚴謹做法應該用標注資料集跑不同加權值的實驗來找最佳值，這是這個專案還沒做到的改進方向。」
+- Regex 只做字面切分，KeyBERT 用 BERT 語意向量選出最相關詞組
+- `@st.cache_resource`：模型等重量級物件，整個 app 只建一份
+- `@st.cache_data`：DataFrame 等資料，不同輸入各快取一份
 
 ---
 
-## 十七、抽象類別（ABC）與 @abstractmethod
+## 九、Python Patterns
 
-### base class 同時有兩種方法
+### Exception 分層處理
 
-父類別不是純框架，而是**規格 + 共用實作**並存：
+```
+底層（scraper）    → raise（往上丟）
+中層（DB helper） → rollback + raise（清理 + 往上丟）
+最上層（pipeline）→ logging.error（收尾，不再 raise）
+```
 
-| 方法 | 類型 | 誰來實作 |
-|------|------|---------|
-| `get_source_info()` | `@abstractmethod` | 每個子類別自己寫 |
-| `fetch_articles()` | `@abstractmethod` | 每個子類別自己寫 |
-| `_load_urls()` | 一般方法 | BaseScraper 寫好，子類別繼承直接用 |
-| `_save_to_db()` | 一般方法 | BaseScraper 寫好，子類別繼承直接用 |
-| `_get_with_retry()` | 一般方法 | BaseScraper 寫好，子類別繼承直接用 |
+- `raise`：保留完整 traceback ✅
+- `raise e`：重置 traceback 起點 ❌
+- 最上層不 raise：再拋就是 unhandled exception，Python 印 traceback 死掉
 
-`BaseScraper` 定義「要有什麼、回傳什麼格式」，子類別填入「實際怎麼做」：
+### Abstract Base Class（ABC）
 
 ```
 BaseScraper（框架 + 共用邏輯）
-  ├── 你必須告訴我來源資訊     → get_source_info()   ← @abstractmethod，空殼
-  ├── 你必須告訴我怎麼爬文章   → fetch_articles()    ← @abstractmethod，空殼
-  └── 存進 DB 我來處理         → run() / _save_to_db() / _insert_*  ← 有實作
-
-PttScraper（實作）
-  ├── get_source_info()  → {'name': 'PTT Stock', 'url': '...'}
-  └── fetch_articles()   → requests + BeautifulSoup 解析 PTT HTML
+  ├── @abstractmethod：get_source_info()、fetch_articles()  ← 子類別必須實作
+  └── 一般方法：run()、_save_to_db()、_get_with_retry()    ← 子類別繼承直接用
 ```
 
-### @abstractmethod 的空殼永遠不會被執行
+- 新增來源只要建子類別實作兩個 method，DB 寫入邏輯全在 base
+- `@abstractmethod` 的空殼永遠不會被執行，Python import 時就掃描 class 結構
+
+### 並行爬蟲（ThreadPoolExecutor）
 
 ```python
-@abstractmethod
-def fetch_articles(self) -> list:
-    """..."""   # 這裡的內容永遠不跑
+with ThreadPoolExecutor() as executor:
+    futures = {executor.submit(fn, arg): name for ...}
+    for future in as_completed(futures):
+        future.result()   # 若子 thread raise，這裡重新 raise
 ```
 
-`PttScraper().run()` 呼叫 `self.fetch_articles()` 時，Python 直接跳到 `PttScraper.fetch_articles()`，base 的空殼完全略過。
+- I/O bound → `ThreadPoolExecutor`（等 HTTP，不消耗 CPU）
+- `as_completed()`：哪個先完先處理，不按送入順序
+- 每個來源獨立 thread + 獨立 DB 連線 → thread-safe
 
-### Python 在 import 時就掃描 class 結構
-
-不用執行任何方法，import 時 Python 就已讀完所有 class 定義：
-
-```
-import PttScraper
-    ↓
-Python 掃描：PttScraper 繼承 BaseScraper
-    ↓
-檢查所有 @abstractmethod 是否都被實作
-    ↓
-有 → 登記完畢，可以建立物件
-沒有 → 標記「不完整」，建立物件時報錯
-```
+### Context Manager
 
 ```python
-class PttScraper(BaseScraper):
-    pass  # 沒有實作 fetch_articles
-
-scraper = PttScraper()  # TypeError: Can't instantiate abstract class
+@contextmanager
+def get_db():
+    conn = connect()
+    try:
+        yield conn
+    finally:
+        conn.close()   # 不管有沒有 exception 都會關
 ```
 
-### class 子類別(父類別) — 繼承語法
+解決 connection leak：`with` 進去拿 handle，出來自動關閉。
 
-```python
-class PttScraper(BaseScraper):
-```
+### Python 版本陷阱
 
-括號裡放父類別，代表：
-1. **擁有**父類別所有方法（`run()` / `_save_to_db()` 等不用重寫）
-2. **必須實作**父類別的所有 `@abstractmethod`，否則建立物件時報錯
+- `str | None`（PEP 604）→ Python 3.10+ 才支持
+- Python 3.9 在 class 定義時直接 `TypeError`，整個模組 import 失敗
+- 安全寫法：`Optional[str]`（3.5+）
 
-沒有括號就是普通 class，跟 BaseScraper 完全無關，什麼都要自己從頭寫。
+### pandas 速查
 
-### config.py 的邊界
-
-**放進 config 的**：整個專案都可能用到的常數（DB 設定、table 名稱、TWSE 設定、Redis、S3）
-
-**不放 config 的**：只有單一模組使用的常數（api.py 的查詢範圍限制、visualization 的 UI 設定）
+| 概念 | 說明 |
+|------|------|
+| `shift(1)` | 整欄往下移一格，第一筆自動 NaN — 取代 iterrows 逐列計算 |
+| NaN vs None | NaN = pandas 缺失值，psycopg2 不認識；None = Python 空值，自動轉 NULL |
+| `.copy()` | 操作共享 DataFrame 前必須 copy，否則 in-place 修改污染快取 |
 
 ---
 
-### 新增來源規範（強制）
+## 十、Infrastructure
 
-1. **HTTP 請求一律用 `self._get_with_retry()`**，禁止直接用 `requests.get()`
-2. **無該欄位明確填 `None`**，不靠 `.get('key', 預設值)` 猜測
+### CI/CD（GitHub Actions）
 
-```python
-class NewScraper(BaseScraper):
-    def fetch_articles(self):
-        response = self._get_with_retry(url)   # ✅ 有 retry
-        # response = requests.get(url)         # ❌ 禁止
-        return [{
-            'title':      '...',
-            'push_count': None,   # ✅ 無此欄位明確填 None
-            'comments':   [],     # ✅ 無留言明確填空 list
-        }]
-```
+- SSH 啟動 uvicorn 後不結束 → 用 `setsid nohup ... > /dev/null 2>&1 &`
+- pytest 無真實 DB → `unittest.mock.patch` 注入假資料
+- patch 要 patch「使用者的命名空間」：`patch("api.func")` ✅
 
-### 擴充新來源只需加子類別
-
-DB 寫入邏輯全在 base，新增來源只要建新子類別實作兩個方法，其餘不用動：
-
-```python
-class NewScraper(BaseScraper):
-    def get_source_info(self): ...
-    def fetch_articles(self): ...
-# run() / _save_to_db() / _insert_* 全部繼承，不用重寫
-```
-
----
-
-## 十五、GROUP BY 規則與 Subquery 模式
-
-### 問題：非聚合欄位必須全部放進 GROUP BY
-
-PostgreSQL 規定：SELECT 裡出現的每個欄位，若沒有被聚合函式包住（AVG/SUM/COUNT/MAX/MIN），就必須出現在 GROUP BY 子句。
-
-```sql
--- ❌ 錯誤：score 是聚合欄位，但 close、change 不是
-SELECT DATE(published_at), AVG(score), close, change
-FROM articles a
-JOIN sentiment_scores s ON ...
-JOIN stock_prices sp ON ...
-GROUP BY DATE(published_at)    -- close、change 沒放進來 → 報錯
-```
-
-### AVG 只是「怎麼壓」，GROUP BY 才是「按什麼切」
-
-`avg_sentiment` 是壓縮**之後**的結果，GROUP BY 就是壓縮的動作本身。
-
-```sql
--- 沒有 GROUP BY：把全部文章（不分日期）全壓成一個數字，只回傳一列
-SELECT DATE(published_at), AVG(score)
-FROM articles a JOIN sentiment_scores s ON ...
-
--- 加上 GROUP BY：按日期分組，每組各算一個平均，每天一列
-SELECT DATE(published_at), AVG(score)
-FROM articles a JOIN sentiment_scores s ON ...
-GROUP BY DATE(published_at)
-```
-
-### GROUP BY 只看 SELECT，不看整個 table
-
-> 你先決定 SELECT 要哪些欄位 → 哪些用了聚合函式 → 剩下的全部放 GROUP BY
-
-跟 table 有多少欄位無關，只看你 SELECT 裡寫了什麼。
-
-```sql
-SELECT
-    DATE(published_at),   -- 沒有聚合函式 → 放 GROUP BY
-    AVG(score)            -- 有聚合函式   → 不放 GROUP BY
-FROM ...
-GROUP BY DATE(published_at)
--- table 裡還有 title、author、url... 全部不管，因為 SELECT 沒選它們
-```
-
-### 聚合 vs 非聚合的判斷
-
-- **判斷範圍**：只看 SELECT 裡出現的欄位，不是整個 table
-- **聚合欄位**：SELECT 裡被 AVG/SUM/COUNT/MAX/MIN 包住的欄位 → 不放 GROUP BY
-- **非聚合欄位**：SELECT 裡沒有被聚合函式包住的欄位 → 全部放 GROUP BY
-
-### 解法：Subquery 模式
-
-在 subquery 裡先做聚合（只 GROUP BY 真正的 key），外層再 JOIN 其他表拿剩下的欄位：
-
-```sql
-SELECT sub.sentiment_date, sub.avg_sentiment, sp.close, sp.change
-FROM (
-    SELECT
-        DATE(a.published_at) AS sentiment_date,
-        AVG(s.score)         AS avg_sentiment
-    FROM articles a
-    JOIN sentiment_scores s ON s.article_id = a.article_id
-    GROUP BY DATE(a.published_at)   -- 只有一個 key，乾淨
-) sub
-JOIN stock_prices sp
-    ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
-ORDER BY sub.sentiment_date
-```
-
-- 內層 subquery：只做 articles × sentiment_scores 的聚合，GROUP BY 只放 DATE(published_at)
-- 外層：把聚合結果當成一張暫時表，JOIN stock_prices 拿 close、change
-- `+ INTERVAL '1 day'`：PTT 情緒是當日，股價是隔日，JOIN 時做日期偏移
-
-### 為什麼不在外層加更多 GROUP BY
-
-```sql
--- 技術上能通過，但語義錯誤
-GROUP BY DATE(published_at), close, change
--- 同一天如果有多個 close 值（不同股票），就會分成多組
--- 現在只有 0050 一支，所以不會出錯；但一旦多股就爆
-```
-
-Subquery 模式才是正確架構：讓聚合和 JOIN 分開，各自只做自己該做的事。
-
----
-
-## 十六、KeyBERT 關鍵字抽取
-
-### 為什麼換掉 regex 斷詞
-
-regex 只能做字面切分（e.g. 按標點符號切），沒有語意理解，常抓到無意義詞。KeyBERT 用 BERT 的語意向量，選出和整段文字語意最相近的詞組，品質高很多。
-
-### 使用方式
-
-```python
-from keybert import KeyBERT
-
-@st.cache_resource     # 模型是重量級物件，整個 app 只建立一次
-def _kw_model():
-    return KeyBERT()
-
-text     = ' '.join(df['Title'].tolist())           # 所有標題串成一段文字
-keywords = _kw_model().extract_keywords(
-    text,
-    keyphrase_ngram_range=(1, 2),   # 抽 1~2 個字的詞組
-    top_n=20                        # 回傳前 20 個關鍵詞
-)
-# keywords = [("台積電", 0.82), ("股價上漲", 0.79), ...]
-top_20_words = pd.DataFrame(keywords, columns=['Word', 'Score'])
-```
-
-### @st.cache_resource vs @st.cache_data
-
-| 裝飾器 | 用於 | 特點 |
-|--------|------|------|
-| `@st.cache_resource` | 模型、DB 連線等重量級物件 | 整個 app session 只建立一份，所有使用者共用 |
-| `@st.cache_data` | DataFrame、JSON 等資料 | 每個不同的輸入參數各快取一份 |
-
----
-
-## 十一、Shell 輸出重導向
-
-### Linux 三個預設 file descriptor
-
-| 數字 | 名稱   | 說明           |
-|------|--------|----------------|
-| `0`  | stdin  | 標準輸入（鍵盤）|
-| `1`  | stdout | 標準輸出（正常結果）|
-| `2`  | stderr | 標準錯誤（錯誤訊息）|
-
-### `> /dev/null 2>&1 &` 拆解
+### Shell 重導向
 
 ```bash
 > /dev/null    # stdout → 黑洞
-2>&1           # stderr → 跟 stdout 同一個地方（也就是黑洞）
+2>&1           # stderr → 跟 stdout 同一個地方
 &              # 背景執行
 ```
 
-- `&1` 裡的 `&` = 「這是 fd 編號，不是檔名」；若寫 `2>1` 會建立名為 `1` 的檔案
-- 為什麼不直接 `2>/dev/null`：可以，但 `2>&1` 只需寫一次目的地，改目的地時只改一處
-- 為什麼 `nohup` 還需要 `> /dev/null 2>&1`：`nohup` 只處理 SIGHUP，stdout/stderr 若沒重導向仍掛在 SSH session，SSH 斷線時 process 可能被 kill
+`&1` 的 `&` = fd 編號標記；`2>1` 會建立名為 `1` 的檔案。
 
-### `pkill -f` vs `kill $(lsof -t -i:PORT)`
+### macOS 自動排程
+
+- **cron 在 macOS Sequoia 無法使用**（launchctl load 失敗）
+- **改用 launchd**：plist 放 `~/Library/LaunchAgents/`
+- **路徑陷阱**：launchd CWD 預設 `/`，script 裡必須硬編碼 `PROJECT_DIR`
+
+### Logging
+
+| 概念 | 說明 |
+|------|------|
+| `basicConfig` | 全域設定：格式、等級 |
+| `getLogger(__name__)` | 模組級 logger，可單獨設定等級 |
+| f-string | 做了再決定印不印（DEBUG 等級也會組合字串）|
+| `%s` 佔位符 | 先決定印不印，不印什麼都不做（效能較好）|
+
+### .env 陷阱
 
 ```bash
-# 用 port 找（舊版）
-kill $(lsof -t -i:8000) 2>/dev/null   # port 沒有 process 時 lsof 回傳空，kill 報錯
+PG_HOST=        # 讀進來是空字串 ""，不是 None
+# os.environ.get("PG_HOST", "localhost") 拿到 ""，不是 "localhost"
+```
 
-# 用程式名稱找（新版）
-pkill -f "uvicorn api:app" || true    # 找不到時 || true 讓 exit code = 0，script 不中斷
+`.env` 設了空值 = key 存在但值是 `""`，預設值不會生效。要嘛填值，要嘛刪掉那行。
+
+### config.py 邊界（局部性原則）
+
+- **放 config**：多個檔案 import 的常數（PG_CONFIG、SOURCES、MAX_RETRY、*_TABLE）
+- **不放 config**：只有單一模組用的常數 → 放在該模組最上面
+
+```
+PTT_SCRAPE_SLEEP   → ptt_scraper.py（只有 ptt 用）
+TWSE_TIMEOUT       → tw_stock_fetcher.py（只有 twse 用）
+REDIS_HOST/PORT    → cache_helper.py（只有 cache 用）
+S3_BUCKET          → backup.py（只有 backup 用）
+BERT_MODEL         → bert_sentiment.py（只有 bert 用）
+CACHE_KEY_ARTICLES → api.py（只有 api 用）
+```
+
+好處：改參數只開一個檔案，常數就在使用它的程式碼旁邊。
+壞處：如果常數未來變成多處共用，要記得搬回 config。
+
+### Markdown 預覽
+
+| 方式 | 操作 |
+|------|------|
+| **VS Code 側邊預覽** | `Cmd + K` → `V` |
+| **VS Code 全螢幕預覽** | `Cmd + Shift + V` |
+| **HackMD** | 貼到 https://hackmd.io，左右分割即時預覽 |
+| **GitHub** | push 後直接在網頁點 `.md` 檔，自動渲染 |
+
+---
+
+## 十一、遷移與資料搬運
+
+### SQLite → PostgreSQL 核心挑戰
+
+- **ID 不連續**：用 URL 當橋梁建立 `id_map: Dict[sqlite_id, pg_id]`
+- **型別轉換**：TEXT → INTEGER/TIMESTAMP，轉換失敗用預設值不中斷遷移
+- **記憶體管理**：140 萬筆用 `fetchmany(5000)` 分批讀，不用 `fetchall()`
+- **幂等設計**：`ON CONFLICT DO NOTHING/UPDATE`，遷移腳本可安全重複執行
+
+### batch 內 dedup
+
+同一篇文章多則相同推文 → dict comprehension 去重：
+
+```python
+deduped = list({(t, tid, m): row for t, tid, m, *_ in batch}.values())
 ```
 
 ---
 
-## 十七、Great Expectations 進階用法
+## 十二、ETF 持股與 NER 字典
 
-### `mostly` 參數
+### 台股 0050 成分股
 
-`mostly` 是 GE expectation 的容忍比例，值域 0.0～1.0。
+無公開 API → 用 TWSE 收盤價 × 融資限額 ≈ 市值，排序取前 50 名普通股。
 
-```python
-# 允許最多 1% 的值不符合規則（99% 符合就算 PASS）
-ge_voo.expect_column_values_to_be_between('change', -100, 100, mostly=0.99)
-```
+### 美股 VOO（S&P 500）
 
-使用時機：資料有**已知且合理的例外**時。
-- `change` 欄位的第一筆必定是 NULL（沒有前一日收盤價），嚴格 `mostly=1.0` 會讓 pipeline 每次都 FAIL
-- `mostly=0.99` 讓這個極少數 NULL 不影響整體驗證
+從 Wikipedia 用 `pd.read_html()` 抓取，約 503 支（含雙股份類別）。
+Yahoo Finance 代號：`BRK.B` → `BRK-B`。
 
-不用 `mostly`：`title`、`url`、`trade_date` 這類絕對不能有 NULL 的欄位，直接用 `expect_column_values_to_not_be_null()`（等同 `mostly=1.0`）
+### stock_dict.json 更新
+
+**replace 而非 merge**：用 merge 的話被剔除的舊成分股會永遠留著。
 
 ---
 
-## 十八、API 特殊行為：HTTP 200 with Error Body
+## 十三、Git Workflow
 
-Arctic Shift API 注意事項：
-- 第三方 Reddit 歷史存檔服務，非 Reddit 官方 API
-- 錯誤格式特殊：永遠回 HTTP 200，錯誤訊息塞在 JSON body 內，需自行檢查 data.get("error")，HTTP retry 攔不到這類錯誤
+### Tag 規範
 
-### 問題
-
-多數 API 遇到錯誤會回傳 4xx/5xx，`raise_for_status()` 可以捕捉。
-但部分第三方 API（如 **Arctic Shift**）即使參數錯誤，仍回傳 HTTP 200，錯誤在 body 裡：
-
-```json
-{"data": null, "error": "'sort' must be one of asc, desc"}
-```
-
-### 問題所在
-
-```python
-response.raise_for_status()     # HTTP 200 → 不 raise，程式繼續跑
-posts = data.get("data") or []  # None → [] → 以為「無資料」，靜默結束
-```
-結果：爬蟲正常跑完，但一篇都沒拿到，沒有任何 ERROR log。
-
-### 解法
-
-```python
-data  = response.json()
-error = data.get("error")
-if error:
-    logging.warning(f"API 錯誤：{error}，停止")
-    break
-```
-
-**先讀 body，再判斷 error 欄位**，不能只靠 HTTP status code。
-
-### 教訓
-
-遇到第三方 API 時，先看文件確認錯誤回傳格式，不要假設錯誤一定是 4xx/5xx。
-
----
-
-## 十九、`_get_with_retry` 架構設計
-
-### 為什麼同時有 module-level 函式和實例方法
-
-```
-base_scraper.py
-  ├── def get_with_retry(url, **kwargs)          ← module-level，供任何地方 import
-  └── class BaseScraper
-        └── def _get_with_retry(self, url, **kwargs)  ← 實例方法，委派給上面那個
-```
-
-**module-level `get_with_retry()`**：給不繼承 BaseScraper 的類別直接 import 使用。
-```python
-# tw_stock_fetcher.py（不繼承 BaseScraper，股價不是文章）
-from scrapers.base_scraper import get_with_retry
-response = get_with_retry(url, params=params)
-```
-
-**`BaseScraper._get_with_retry(self, ...)`**：給子類別用 `self._get_with_retry()` 呼叫。
-```python
-# ptt_scraper.py（繼承 BaseScraper）
-response = self._get_with_retry(url, headers=self.HEADERS)
-```
-
-### 為什麼子類別要用 `self._get_with_retry()` 而不直接 import
-
-1. **OOP 慣例**：子類別用 `self.method()` 呼叫父類別方法，是繼承的標準寫法
-2. **可覆寫性**：子類別未來可以 override `_get_with_retry()` 加入自訂邏輯（e.g. 特定來源的 header 處理）
-3. **語意清晰**：`self._get_with_retry()` 表示「我用自己的 retry 方法」，不是任意全域函式
-
-### SQL comment 寫法
-
-```python
-CREATE_STOCK_PRICES = """
--- 追蹤標的：0050（元大台灣50）
-CREATE TABLE IF NOT EXISTS stock_prices (
-    ...
-);
--- 追蹤標的：VOO（Vanguard S&P 500 ETF）
-CREATE TABLE IF NOT EXISTS us_stock_prices (
-    ...
-);
-"""
-```
-
-`--` 是 SQL 單行 comment，可直接寫在 DDL 字串裡，`psycopg2.execute()` 執行時完全忽略，不影響建表。
-
----
-
-## 二十、Schema Validator 作為唯一驗證點
-
-### Fallback 反模式
-
-在把資料傳給 schema validator 之前加 fallback，會讓 validator 失去意義：
-
-```python
-# ❌ 反模式：title or url 繞過 validator
-article = {
-    "title": title or url,   # title 空時改用 url 頂替，validator 收到非空字串，不會攔截
-    ...
-}
-ArticleSchema(**article)     # title_not_empty 永遠不會觸發
-
-# ✅ 正確做法：直接傳，讓 validator 決定
-article = {
-    "title": title,          # title 空 → validator 攔截 → logging.warning → return None
-    ...
-}
-ArticleSchema(**article)
-```
-
-### 設計原則
-
-**Validator 應該是唯一的資料品質把關點**，不要在上游加 fallback 繞過它。
-
-理由：
-- `title or url` 讓空 title 的貼文悄悄存進 DB，標題變成 URL，難以察覺
-- schema validator 的存在就是為了攔截壞資料，fallback 讓它形同虛設
-- 一旦有 fallback，QA.py 的 `title IS NOT NULL` 檢查也會誤以為資料乾淨
-
-### 具體案例：Reddit `push_count` 的多重保護
-
-```python
-# score 欄位的雙重保護
-score = post.get("score", 0) or 0
-# .get("score", 0)：key 不存在 → 0
-# or 0：key 存在但值是 None（JSON null）→ 0
-
-# clamp 把無上限的 Reddit score 壓進 -100~100
-push_count = max(-100, min(100, score))
-
-# ArticleSchema.push_count_in_range 作為第二道防線
-ArticleSchema(**article)  # 若 clamp 邏輯有 bug，validator 兜底
-```
-
-`max(-100, min(100, score))` 是標準 clamp 寫法：先 `min` 設上限，再 `max` 設下限。
-
----
-
-## 二十一、`sys.argv` — CLI 腳本的命令列參數
-
-### 基本結構
-
-```python
-import sys
-
-# python3 script.py 2022-01-01 2023-12-31
-# sys.argv[0] = "script.py"       ← 腳本名稱，永遠存在
-# sys.argv[1] = "2022-01-01"      ← 第一個使用者參數
-# sys.argv[2] = "2023-12-31"      ← 第二個使用者參數
-# len(sys.argv) = 3
-```
-
-### 典型用法（reddit_batch_loader.py）
-
-```python
-if __name__ == "__main__":
-    # sys.argv[0] = 腳本名稱，argv[1] = after 日期，argv[2] = before 日期
-    if len(sys.argv) == 3:
-        after_dt  = datetime.strptime(sys.argv[1], "%Y-%m-%d")
-        before_dt = datetime.strptime(sys.argv[2], "%Y-%m-%d")
-    else:
-        # 使用者沒傳參數，用預設值
-        before_dt = datetime.utcnow()
-        after_dt  = datetime.strptime(REDDIT_BATCH_HISTORY_START, "%Y-%m-%d")
-```
-
-### `len(sys.argv) == 3` 的含義
-
-腳本名稱永遠佔 `argv[0]`，所以「使用者傳了兩個參數」對應的是 `len == 3`，不是 `len == 2`。
-
-| 執行指令 | `len(sys.argv)` | 說明 |
-|---------|----------------|------|
-| `python3 script.py` | 1 | 沒有使用者參數 |
-| `python3 script.py 2022-01-01` | 2 | 一個使用者參數 |
-| `python3 script.py 2022-01-01 2023-12-31` | 3 | 兩個使用者參數（補抓指定區間）|
-
-## 二十二、pandas 向量化 vs iterrows
-
-### iterrows() 的結構
-
-把 DataFrame 逐列切開：
-- `idx` = 那一列的 index（縱軸，如日期）
-- `row` = 那一列所有欄位的值（可用 `row["欄位"]` 橫向取值）
-
-```python
-for idx, row in hist.iterrows():
-    val = row["Close"]  # 橫向取欄位
-```
-
-### shift(1) 取代逐列計算
-
-計算每日漲跌：
-```python
-# 舊寫法（iterrows + get_loc，繁瑣）
-loc = hist.index.get_loc(idx)
-prev_close = closes.iloc[loc - 1] if loc > 0 else None
-change = round(float(row["Close"]) - float(prev_close), 2) if prev_close else None
-
-# 新寫法（向量化，一行）
-hist["change"] = (hist["Close"] - hist["Close"].shift(1)).round(2)
-```
-
-`shift(1)` 把整欄往下移一格，第一筆自動是 NaN（無前一天），其餘每格自動對齊前一天。
-
-### NaN vs None
-
-| | NaN | None |
+| | commit message | git annotated tag |
 |---|---|---|
-| 來源 | pandas/numpy | Python |
-| 意義 | 缺失的浮點數 | 空值 |
-| DB | psycopg2 不認識，會報錯 | 自動轉 NULL |
-
-處理方式：
-```python
-float(row["change"]) if not pd.isna(row["change"]) else None
-```
-
----
-
-## 二十三、Git Workflow 設計
-
-### git tag vs commit message prefix
-
-| | commit message prefix | git annotated tag |
-|---|---|---|
-| 位置 | 訊息文字 | 獨立 git ref 物件 |
+| 用途 | 描述改動脈絡 | 標記任務完成里程碑 |
+| 唯一性 | 可重複 | 全 repo 唯一 |
 | 查詢 | `git log --oneline` | `git tag -l` |
-| GitHub 顯示 | commit 列表 | Tags 頁面 / commit 旁標記 |
-| 唯一性 | 可重複 | 全 repo 唯一，只能指向一個 commit |
-| 推薦用途 | 描述改動脈絡 | 標記任務完成里程碑 |
 
-**本專案規範**：commit message 不加前綴，改用 annotated tag 標記對應的任務名稱（直接取自 daily_guide_v2.html）。
-
-### git tag 操作
-
-```bash
-# 建立 annotated tag
-git tag -a "Phase3·FastAPI" <hash> -m "Phase3·FastAPI"
-
-# 刪除本地 tag
-git tag -d "Phase3·FastAPI"
-
-# 刪除遠端 tag（: 前空白 = 推送空內容覆蓋遠端）
-git push origin :refs/tags/Phase3·FastAPI
-
-# 查看某 commit 上的所有 tag
-git tag --points-at <hash>
-
-# 推送所有 tag
-git push origin --tags
-```
-
-### 什麼時候不加 tag
-
-- 純文件修改（md / CLAUDE.md / key_word.md）
-- bug fix 不對應任何 daily_guide 任務
-- 多個 commit 共同完成一個任務（只在最後一個加 tag）
-
-### 純 docs commit 的處理原則
-
-純文件 commit 不應單獨存在：無法對應任何任務 → 無法加 tag → 造成 history 出現無意義的孤立節點。
-
-**正確做法**：等下一個有實質改動的 commit 一起 push，用 soft reset 合併後再 push。
-
-### git history rewrite 技術（無 -i 旗標）
-
-```python
-# 逐一重建 commit（保留原始 tree、author、timestamp）
-new_hash = subprocess.run(
-    ['git', 'commit-tree', tree, '-p', parent, '-m', new_msg],
-    env={**os.environ, 'GIT_AUTHOR_DATE': original_date, ...}
-)
-# 更新 branch 指向
-subprocess.run(['git', 'update-ref', 'refs/heads/main', new_hash])
-subprocess.run(['git', 'reset', '--hard', new_hash])
-```
-
-- squash：跳過舊 commit，用新 commit 的 tree，parent 接到舊 commit 的 parent
-- force push 後遠端同步更新
+- commit message 不加前綴，改用 annotated tag 標記任務名稱
+- 純 docs commit 等下一個實質改動一起合併 push
+- 不加 tag 的情況：純文件修改、bug fix、多 commit 共同完成一個任務（只在最後一個加）
 
 ---
 
-## 二十四、Python 版本相容性陷阱
+## 十四、API 資安與權限管理
 
-### `X | None` vs `Optional[X]`
+### SQL 層：GRANT / REVOKE
 
-| 語法 | 支援版本 | 說明 |
-|------|----------|------|
-| `Optional[X]` | Python 3.5+ | `from typing import Optional`；`Union[X, None]` 縮寫 |
-| `X \| None` | Python 3.10+ | PEP 604，更簡潔但不向下相容 |
+PostgreSQL 沒有 `DENY`（SQL Server 才有），只有 `GRANT` 和 `REVOKE`。
 
-**危險情境**：在 Python 3.9 環境用了 `str | None`，在 Pydantic model class 定義時立即觸發 `TypeError`，導致整個模組 import 失敗。
+```sql
+-- DO $$ ... END $$：匿名程式區塊，讓 SQL 可以用 IF/THEN 邏輯
+-- pg_roles：PostgreSQL 內建系統表（存放所有角色），不需要建，裝好就有
+-- CREATE ROLE ... LOGIN：建帳號 + 允許登入
+IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'api_user') THEN
+    CREATE ROLE api_user LOGIN PASSWORD 'xxx';
+END IF;
 
-```python
-# Python 3.9 會在 class 定義時炸掉：
-class ArticleSchema(BaseModel):
-    author: str | None  # TypeError: unsupported operand type(s) for |
+-- 三層權限（CONNECT → USAGE → SELECT），成對授權，缺一不可
+GRANT CONNECT ON DATABASE stock_analysis_db TO api_user;  -- 允許連線
+GRANT USAGE ON SCHEMA public TO api_user;                 -- 允許看到 table（與 SELECT 成對）
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO api_user;  -- 允許讀資料（與 USAGE 成對）
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO api_user;  -- 未來新建的 table 也自動授權
 
-# 正確寫法（3.9 相容）：
-from typing import Optional
-class ArticleSchema(BaseModel):
-    author: Optional[str]  # OK
+-- etl_user：給完整讀寫
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO etl_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO etl_user;  -- SERIAL 自動遞增需要
+
+-- 防禦性 REVOKE：防止有人誤下 GRANT ALL
+REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM api_user;
 ```
 
-**靜默失敗的危險性**：import 失敗不會被 `except requests.RequestException` 捕捉，pipeline 繼續跑但爬蟲回傳 0 篇，log 只有 INFO 沒有 ERROR，只靠 DB 筆數才能發現。
+- **USAGE vs SELECT**：USAGE = 進入 schema 看到有哪些 table；SELECT = 讀 table 裡的資料。兩個缺一不可，PostgreSQL 不會自動隱含
+- **SEQUENCE 權限**：`USAGE` 允許 `nextval()`（INSERT 時產生 ID），`SELECT` 允許 `currval()`（讀取剛才產生的 ID）
+- **權限在 DB 端控制，不在 Python 端**：`psycopg2.connect(user="api_user")` 只是用哪個帳號登入，實際能做什麼由 GRANT/REVOKE 決定
+- **`ALTER DEFAULT PRIVILEGES`**：確保未來新建的表也自動繼承權限，不用每次手動 GRANT
+- **帳密存 `.env`**，透過 `os.environ.get()` 讀取，不寫死在 code
+- **DDL 不能用 `%s` 參數化**：`CREATE ROLE`、`GRANT` 的 identifier（角色名、表名）不能用 `%s`（會加引號導致語法錯），只能用 `.format()` 或 `psycopg2.sql.Identifier()`
 
-### `concurrent.futures` 並行爬蟲
+### JWT Authentication
 
-```python
-# I/O bound → ThreadPoolExecutor（等 HTTP，不消耗 CPU）
-with concurrent.futures.ThreadPoolExecutor() as executor:
-    futures = {executor.submit(_run_source, cls): cls.__name__ for cls in _ALL_SOURCES}
-    for future in concurrent.futures.as_completed(futures):
-        name = futures[future]
-        try:
-            future.result()  # 若子執行緒 raise，這裡會重新 raise
-        except Exception as e:
-            logging.error(f"[Extract] 失敗：{name} — {e}")
+```
+POST /auth/login
+Body: {"username": "admin", "password": "admin123"}
+         ↓
+FastAPI + Pydantic 解析 request body → LoginRequest 物件
+         ↓
+驗證帳密 → create_token() → 回傳 JWT token
+         ↓
+後續請求 Header: Authorization: Bearer <token>
+         ↓
+Depends(verify_token) 驗證 → 通過才進 endpoint
 ```
 
-- `as_completed()`：哪個先跑完先處理，不按送入順序
-- `future.result()`：取得回傳值，若有 exception 會重新 raise 到主執行緒
-- 每個來源獨立 thread，DB 連線在各自的 `_save_to_db()` 內，`pg_helper` context manager 是 thread-safe（`psycopg2` 每次建立獨立連線）
+- **`sub`**：JWT 標準欄位（RFC 7519），全名 subject，放 username；不用自訂 `"username"` key
+- **`exp`**：過期時間，`python-jose` 自動驗證
+- **`role`**：自訂欄位，標準沒有，可自由命名
+- **`token_type: "bearer"`**：OAuth 2.0 標準，誰拿到 token 就能用（持有者授權）
+- **`Depends(verify_token)`**：FastAPI 執行 endpoint 前先跑 verify_token，失敗直接 401 不進 function body
+- **`dict.get()` vs `dict[]`**：key 不存在時 `.get()` 回 None，`[]` 拋 KeyError；login 驗證用 `.get()` 防止帳號不存在時 crash
 
-*最後更新：2026-04-05*
+### Pydantic request body 解析流程
+
+```
+Client 送 JSON: {"username": "admin", "password": "admin123"}
+         ↓
+def login(req: LoginRequest):   ← 型別是 BaseModel 子類別
+         ↓
+FastAPI 看到 BaseModel → 自動從 request body 解析
+         ↓
+Pydantic 把 JSON key 對應到 class 欄位（名稱要完全一樣）
+         ↓
+req.username = "admin" / req.password = "admin123"
+```
+
+- **型別提示決定來源**：`BaseModel` → body；`int/str` 基本型別 → path/query；`Query(...)` → query string
+- **key 名稱一對一對應**：JSON `"username"` → class `username: str`，名稱不同 → 422 Validation Error
+
+### PII Masking
+
+```python
+def hash_author(author: str) -> str:
+    salted = f"{PII_HASH_SALT}:{author}"
+    return hashlib.sha256(salted.encode()).hexdigest()[:16]
+```
+
+- **SHA-256 加鹽**：防彩虹表攻擊，鹽值存 `.env`
+- **取前 16 碼**：夠唯一（2^64 碰撞機率極低），比完整 hash 省空間
+- **不可逆**：hash 後無法還原原始帳號（GDPR 合規）
+- **冪等**：同帳號 → 同 hash → `GROUP BY` 統計仍有意義
+- **LENGTH > 16 判斷**：已 hash 的不重複處理（冪等設計）
 
 ---
 
-## 二十五、並行 DB 寫入 Race Condition
+## 十五、BTC Pipeline — 大資料實踐
 
-### TOCTOU（Time-Of-Check-Time-Of-Use）問題
+### Kafka 串流
+- **KRaft mode**: Kafka 3.7+ 不需要 Zookeeper，KAFKA_PROCESS_ROLES=broker,controller
+- **Idempotent Producer**: enable_idempotence=True → 避免重複推送（exactly-once 語義的基礎）
+- **Manual Offset Commit**: enable_auto_commit=False → 處理完才 commit，確保 at-least-once
+- **Dead Letter Queue (DLQ)**: 壞訊息不丟棄，送入另一個 topic 事後排查
+- **Partition Key**: 同一 symbol 進同一 partition → 保證同交易對的訊息順序
 
-原本 `_get_or_create_source` 的流程：
+### Data Lake 三層
+- **raw → processed → curated**: 原始 JSONL → 清洗後 Parquet (Snappy) → 聚合 OHLCV
+- **Quarantine Layer**: 壞資料（price≤0、quantity≤0、trade_id=None）不混入主流程，隔離到 quarantine/
+- **Snappy 壓縮**: Parquet + Snappy ≈ 6.6x 壓縮，兼顧壓縮率和解壓速度
 
-```python
-# 問題版：SELECT 然後 INSERT，中間有時間差
-cursor.execute("SELECT source_id FROM sources WHERE url = %s", (url,))
-if not cursor.fetchone():
-    cursor.execute("INSERT INTO sources ...")  # 兩個 thread 都通過 SELECT → 都 INSERT → 第二個 crash
-```
+### Partition Strategy
+- **partitionBy('date','symbol')**: 寫入時建立 Hive-style 目錄 `date=2026-03-15/symbol=BTCUSDT/`
+- **Partition Pruning**: 查詢 WHERE date='...' 時，Spark 只掃描目標分區目錄，跳過其他 → explain 看 PartitionFilters
+- **repartition vs coalesce**: repartition = full shuffle（可增可減）、coalesce = no shuffle（只能縮減）
+- **何時該分區**: 資料夠大 + 查詢有明確的分區鍵（低基數、常用於 WHERE）
 
-**root cause**：ThreadPoolExecutor 多個 thread 同時進行 SELECT 判斷「不存在」，然後同時 INSERT，第二個 INSERT 觸發 unique constraint violation。
+### Spark ML Pipeline
+- **Transformer**: 轉換資料但不改 schema（VectorAssembler、StandardScaler）
+- **Estimator**: fit() 後產出 Transformer（RandomForestClassifier → RandomForestClassificationModel）
+- **Pipeline**: 串接 stages，fit(train) 一次完成所有 stage → PipelineModel
+- **VectorAssembler**: 多個 feature column → 一個 Vector column（Spark ML 要求）
+- **模型儲存**: model.write().save(path) → 完整保留 Pipeline 所有 stage
 
-### 修正：讓 DB 自己處理衝突
+---
 
-```python
-# 修正版：INSERT 優先，ON CONFLICT DO NOTHING，再 SELECT 確保拿到 id
-cursor.execute(
-    "INSERT INTO sources (source_name, url) VALUES (%s, %s)"
-    " ON CONFLICT (url) DO NOTHING RETURNING source_id",
-    (name, url)
-)
-row = cursor.fetchone()
-if row:
-    return row[0]
-# ON CONFLICT 觸發時 RETURNING 為空，fallback SELECT
-cursor.execute("SELECT source_id FROM sources WHERE url = %s", (url,))
-return cursor.fetchone()[0]
-```
-
-**關鍵點**：
-- `ON CONFLICT DO NOTHING`：衝突時靜默跳過，不 raise exception
-- `RETURNING`：INSERT 成功才有回傳；衝突時為空，需 fallback SELECT
-- 這個模式是 PostgreSQL 的標準 upsert-or-read 寫法
-
-### `raise e` vs `raise`
-
-```python
-# 錯誤（重置 traceback）
-except Exception as e:
-    raise e  # traceback 起點變成這一行，看不到真正的錯誤位置
-
-# 正確（保留完整 traceback）
-except Exception as e:
-    raise  # 原始 traceback 完整保留
-```
-
-*最後更新：2026-04-05*
+*最後更新：2026-04-08*
