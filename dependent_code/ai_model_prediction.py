@@ -1,5 +1,5 @@
 """
-回測系統設計（p5-label-5）
+AI 模型預測系統（原 ai_model_prediction）
 
 流程：
   1. 從 DB 取每日情緒聚合（avg_sentiment, article_count）
@@ -8,13 +8,16 @@
   4. 特徵工程：sentiment_yesterday / sentiment_3day_avg / push_count_3day_avg
   5. RandomForest Walk-Forward Validation（每季擴展訓練集）
   6. 輸出：Accuracy / F1 / Precision / Recall + 累積報酬曲線
+  7. 追蹤：寫入 ai_model_prediction_runs 表 + MLflow tracking
 
 """
 
 import logging
 import os
+import subprocess
 import sys
 from datetime import date, timedelta
+from typing import Optional
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -26,6 +29,7 @@ from config import (
     SENTIMENT_SCORES_TABLE,
     STOCK_PRICES_TABLE,
     US_STOCK_PRICES_TABLE,
+    AI_MODEL_PREDICTION_RUNS_TABLE,
 )
 from pg_helper import get_pg
 
@@ -48,7 +52,6 @@ MARKET_CONFIG = {
 
 WALK_FORWARD_MONTHS = 3   # 每次往前推進 N 個月
 MIN_TRAIN_MONTHS   = 3    # 最少需要 N 個月訓練資料才起跑
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "backtest_output")
 
 
 # ─── 資料抓取 ──────────────────────────────────────────────────────────────────
@@ -99,7 +102,7 @@ def fetch_price(prices_table: str, start: str, end: str) -> pd.DataFrame:
             df = pd.DataFrame(cur.fetchall(), columns=cols)
 
     if df.empty:
-        logging.warning("[Backtest] %s 無股價資料 %s ~ %s", prices_table, start, end)
+        logging.warning("[AI Prediction] %s 無股價資料 %s ~ %s", prices_table, start, end)
         return df
 
     df["date"]  = pd.to_datetime(df["date"])
@@ -199,62 +202,133 @@ def walk_forward(df: pd.DataFrame) -> pd.DataFrame:
 
 # ─── 績效評估 ──────────────────────────────────────────────────────────────────
 
-def evaluate(result_df: pd.DataFrame, display_name: str) -> None:
-    """輸出準確率、分類報告，並計算「只做多頭信號」的累積報酬"""
+def enrich_and_log(result_df: pd.DataFrame, display_name: str) -> pd.DataFrame:
+    """
+    算每日策略報酬、累積報酬、Buy-and-Hold 對照組，log 準確率/分類報告，
+    回傳 enriched DataFrame（含 strategy_daily_return / strategy_cumulative_return / buy_and_hold_return）。
+    不存檔，結果由呼叫端（Streamlit / pipeline log）直接使用。
+    """
     y_true = result_df["true"]
     y_pred = result_df["pred"]
 
     accuracy = accuracy_score(y_true, y_pred)
     logging.info("\n%s", "=" * 55)
-    logging.info("[%s] Walk-Forward 回測結果", display_name)
+    logging.info("[%s] Walk-Forward 預測結果", display_name)
     logging.info("  樣本數   : %d 天", len(result_df))
     logging.info("  Accuracy : %.4f", accuracy)
     logging.info("\n%s", classification_report(y_true, y_pred,
                                                target_names=["跌(0)", "漲(1)"]))
 
-    # 策略報酬：模型預測漲才進場(拿到真實 next_return)，否則空倉(0 報酬)
+    # 策略每日報酬：模型預測漲才進場(拿到真實 next_return)，否則空倉(0 報酬)
     # vectorized：布林 × 數值 → True=1、False=0，逐元素相乘
     result_df = result_df.copy()
-    result_df["strategy_return"]         = result_df["next_return"] * (result_df["pred"] == 1)
-    result_df["cumulative_strategy"]     = (1 + result_df["strategy_return"]).cumprod()
-    result_df["cumulative_buy_and_hold"] = (1 + result_df["next_return"]).cumprod()
+    result_df["strategy_daily_return"]      = result_df["next_return"] * (result_df["pred"] == 1)
+    result_df["strategy_cumulative_return"] = (1 + result_df["strategy_daily_return"]).cumprod()
+    result_df["buy_and_hold_return"]        = (1 + result_df["next_return"]).cumprod()
 
-    final_strategy     = result_df["cumulative_strategy"].iloc[-1]
-    final_buy_and_hold = result_df["cumulative_buy_and_hold"].iloc[-1]
+    final_strategy     = result_df["strategy_cumulative_return"].iloc[-1]
+    final_buy_and_hold = result_df["buy_and_hold_return"].iloc[-1]
     logging.info("  策略累積報酬    : %.2f%%", (final_strategy - 1) * 100)
     logging.info("  Buy-and-Hold   : %.2f%%", (final_buy_and_hold - 1) * 100)
     logging.info("  相對超額報酬    : %.2f%%", (final_strategy - final_buy_and_hold) * 100)
     logging.info("%s\n", "=" * 55)
 
-    # 儲存結果 CSV（加日期後綴，保留歷史供 Streamlit 讀取 + model drift 分析）
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    today_str = date.today().strftime("%Y%m%d")
-    out_path = os.path.join(OUTPUT_DIR, f"backtest_{display_name.split()[0]}_{today_str}.csv")
-    result_df.to_csv(out_path, index=False)
-    logging.info("[Backtest] 結果已儲存至 %s", out_path)
+    return result_df
 
 
 # ─── 主流程 ────────────────────────────────────────────────────────────────────
 
-def run_backtest(market: str) -> None:
+def _save_run_to_db(market: str, result_df: pd.DataFrame) -> None:
+    """
+    把這次 ai_model_prediction 的摘要指標寫進 ai_model_prediction_runs（歷史追蹤，model drift 分析用）。
+    完整 daily 序列不存 DB — DB 只存 summary metrics。
+    """
+    accuracy           = float((result_df["true"] == result_df["pred"]).mean())
+    strategy_final     = float(result_df["strategy_cumulative_return"].iloc[-1])
+    buy_and_hold_final = float(result_df["buy_and_hold_return"].iloc[-1])
+    sample_days        = len(result_df)
+
+    with get_pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {AI_MODEL_PREDICTION_RUNS_TABLE}
+                    (market, accuracy, strategy_cumulative_return, buy_and_hold_return, sample_days)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (market, accuracy, strategy_final, buy_and_hold_final, sample_days))
+    logging.info("[AI Prediction] 寫入 %s（market=%s）", AI_MODEL_PREDICTION_RUNS_TABLE, market)
+
+
+def _log_to_mlflow(market: str, display_name: str, result_df: pd.DataFrame) -> None:
+    """
+    把這次 ai_model_prediction 的 params + metrics 送進 MLflow（檔案後端，寫到 ./mlruns/）。
+    mlflow 未安裝或寫入失敗都不中止 ai_model_prediction — tracking 只是輔助，不能掛主流程。
+    """
+    try:
+        import mlflow   # lazy import：只有跑 ai_model_prediction 時才載
+    except ImportError:
+        logging.warning("[AI Prediction] mlflow 未安裝，跳過 tracking（pip install mlflow）")
+        return
+
+    try:
+        mlflow.set_experiment(f"ai_model_prediction_{market}")
+        with mlflow.start_run(run_name=display_name):
+            mlflow.log_params({
+                "market":              market,
+                "walk_forward_months": WALK_FORWARD_MONTHS,
+                "min_train_months":    MIN_TRAIN_MONTHS,
+                "n_estimators":        100,         # RandomForest 樹的數量，和 walk_forward 內部一致
+                "features":            ",".join(FEATURES),
+            })
+            accuracy           = float((result_df["true"] == result_df["pred"]).mean())
+            strategy_final     = float(result_df["strategy_cumulative_return"].iloc[-1])
+            buy_and_hold_final = float(result_df["buy_and_hold_return"].iloc[-1])
+            mlflow.log_metrics({
+                "accuracy":                   accuracy,
+                "strategy_cumulative_return": strategy_final - 1,          # 轉成百分比形式（0.025 = 2.5%）
+                "buy_and_hold_return":        buy_and_hold_final - 1,
+                "excess_return":              strategy_final - buy_and_hold_final,
+                "sample_days":                len(result_df),
+            })
+    except Exception as e:
+        logging.warning("[AI Prediction] mlflow log 失敗：%s", e)
+
+
+def _spawn_bert_inference_background() -> None:
+    """
+    以 subprocess 背景執行 BERT 批次推論，呼叫端立刻返回，
+    不阻塞 Streamlit / pipeline。下次跑 ai_model_prediction 時資料就有了。
+    """
+    subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, os; sys.path.insert(0, os.path.dirname(__file__)); "
+         "from bert_sentiment import run_batch_inference; run_batch_inference()"],
+        cwd=os.path.dirname(__file__),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,   # 脫離父行程 session，父退出子也不會被殺
+    )
+    logging.warning("[AI Prediction] 已在背景啟動 BERT 批次推論，請稍後再試。")
+
+
+def run_ai_model_prediction(market: str) -> Optional[pd.DataFrame]:
+    """
+    執行單一市場 AI 模型預測，成功回傳 enriched DataFrame，失敗/資料不足回傳 None。
+    不存檔，結果由呼叫端直接使用（Streamlit 顯示、pipeline log 觀察）。
+    """
     cfg = MARKET_CONFIG[market]
-    logging.info("[Backtest] 開始回測：%s", cfg["display_name"])
+    logging.info("[AI Prediction] 開始預測：%s", cfg["display_name"])
 
     # 1. 情緒資料
     sent_df = fetch_sentiment(cfg["sources"])
     if sent_df.empty:
-        logging.warning("[Backtest] 無情緒資料，跳過 %s", market)
-        return
+        logging.warning("[AI Prediction] 無情緒資料，跳過 %s", market)
+        return None
 
-    # BERT 推論未完成 → 自動觸發 run_batch_inference() 補資料，完成後重查一次
+    # BERT 推論未完成 → 背景啟動推論，此次 ai_model_prediction 先跳過
     if sent_df["avg_sentiment"].isna().all():
-        logging.warning("[Backtest] sentiment_scores 全為 NULL，自動觸發 BERT 推論...")
-        from bert_sentiment import run_batch_inference
-        run_batch_inference()
-        sent_df = fetch_sentiment(cfg["sources"])
-        if sent_df["avg_sentiment"].isna().all():
-            logging.warning("[Backtest] BERT 推論後仍無情緒資料，跳過 %s", market)
-            return
+        logging.warning("[AI Prediction] sentiment_scores 全為 NULL，跳過 %s", market)
+        _spawn_bert_inference_background()
+        return None
 
     start = sent_df["date"].min().strftime("%Y-%m-%d")
     end   = (date.today() + timedelta(days=1)).isoformat()
@@ -262,24 +336,33 @@ def run_backtest(market: str) -> None:
     # 2. 股價資料
     price_df = fetch_price(cfg["prices_table"], start, end)
     if price_df.empty:
-        logging.warning("[Backtest] 無股價資料，跳過 %s", market)
-        return
+        logging.warning("[AI Prediction] 無股價資料，跳過 %s", market)
+        return None
 
     # 3. 合併 + 特徵工程
     df = merge_and_add_features(sent_df, price_df)
-    logging.info("[Backtest] 合併後資料 %d 天", len(df))
+    logging.info("[AI Prediction] 合併後資料 %d 天", len(df))
     if len(df) < MIN_TRAIN_MONTHS * 20:   # 粗估每月 20 個交易日
-        logging.warning("[Backtest] 資料量不足（%d 天），至少需要 %d 天",
+        logging.warning("[AI Prediction] 資料量不足（%d 天），至少需要 %d 天",
                         len(df), MIN_TRAIN_MONTHS * 20)
-        return
+        return None
 
-    # 4. Walk-Forward 回測
+    # 4. Walk-Forward 預測
     result_df = walk_forward(df)
     if result_df.empty:
-        logging.warning("[Backtest] walk_forward 無法產生預測結果")
-        return
+        logging.warning("[AI Prediction] walk_forward 無法產生預測結果")
+        return None
 
-    # 5. 評估
-    evaluate(result_df, cfg["display_name"])
+    # 5. 評估 + enrich
+    enriched = enrich_and_log(result_df, cfg["display_name"])
+
+    # 6. 追蹤：寫 DB（歷史 summary）+ MLflow（params/metrics）— 兩者都不中止 ai_model_prediction
+    try:
+        _save_run_to_db(market, enriched)
+    except Exception as e:
+        logging.warning("[AI Prediction] 寫入 ai_model_prediction_runs 失敗：%s", e)
+    _log_to_mlflow(market, cfg["display_name"], enriched)
+
+    return enriched
 
 

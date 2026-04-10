@@ -361,7 +361,7 @@ QA_checks() 失敗 → repair() → diagnose() 掃壞資料 → 分類來源
 - **策略二**：最長匹配抓公司名（「台灣積體電路」先於「台積」）
 - **match_done 表**：追蹤已處理文章，避免無提及股票的文章被無限重複處理
 
-### 回測系統（Walk-Forward Validation）
+### AI 模型預測系統（Walk-Forward Validation）
 
 - **為什麼不用 Random Split**：時間序列 random split 會偷看未來（data leakage）
 - **Walk-Forward**：Train=[歷史] → Test=[下一季]，訓練集逐步擴展

@@ -102,7 +102,7 @@ project/
 │   ├── pii_masking.py        # PII 遮蔽（author hash 化）
 │   ├── auth.py               # JWT 認證（verify_token）
 │   ├── mongo_helper.py       # MongoDB raw_responses helper
-│   ├── backtest.py           # 回測系統（Walk-Forward + RandomForest）
+│   ├── ai_model_prediction.py # AI 模型預測系統（Walk-Forward + RandomForest）
 │   ├── fetch_etf_holdings.py # ETF 持股抓取（TW 0050 + US S&P 500）→ stock_dict.json
 │   ├── stock_dict.json       # 股票代號↔公司名稱對照（stock_matcher 用）
 │   └── requirements.txt      # 套件清單
@@ -334,7 +334,7 @@ schema → extract（PTT + 鉅亨網 + Reddit + TWSE + VOO）→ transform（QA 
 - [x] auth.py verify_token 加註解
 - [x] Phase 5：BERT 情緒分析（fine-tune + zero-shot 批次推論）
 - [x] Phase 5：Stock Matcher 股票比對（regex + 公司名稱最長匹配，原 ner.py → stock_matcher.py）
-- [x] Phase 5：回測系統（Walk-Forward + RandomForest）
+- [x] Phase 5：AI 模型預測系統（Walk-Forward + RandomForest）
 - [x] pipeline.py 8-step 整合（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup）
 - [x] dim_date 移除（DW schema 簡化，fact_sentiment 直接用 fact_date）
 - [x] stock_symbol denormalized 進 fact_sentiment，tracked_stock 加入 dim_source

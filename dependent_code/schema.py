@@ -6,7 +6,7 @@ import os
 import logging
 import psycopg2
 from dotenv import load_dotenv
-from config import PG_CONFIG, ARTICLE_LABELS_TABLE
+from config import PG_CONFIG, ARTICLE_LABELS_TABLE, AI_MODEL_PREDICTION_RUNS_TABLE
 
 _base = os.path.dirname(__file__)
 load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
@@ -77,6 +77,19 @@ CREATE TABLE IF NOT EXISTS us_stock_prices (
 );
 """
 
+CREATE_AI_MODEL_PREDICTION_RUNS = """
+-- Walk-Forward AI 模型預測歷史：每次 run_ai_model_prediction() 成功 insert 一筆，用於 model drift 分析
+CREATE TABLE IF NOT EXISTS ai_model_prediction_runs (
+    run_id                     SERIAL PRIMARY KEY,
+    market                     VARCHAR(10)  NOT NULL,           -- 'tw' / 'us'
+    run_at                     TIMESTAMP    DEFAULT NOW(),
+    accuracy                   NUMERIC(5,4),
+    strategy_cumulative_return NUMERIC(10,4),                   -- 最終倍數（1.025 = +2.5%）
+    buy_and_hold_return        NUMERIC(10,4),
+    sample_days                INTEGER
+);
+"""
+
 # ─── DDL：建 Index ─────────────────────────────────────────────────────────────
 CREATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_articles_published_at    ON articles(published_at);
@@ -85,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_comments_article_id      ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_sentiment_article_id     ON sentiment_scores(article_id);
 CREATE INDEX IF NOT EXISTS idx_stock_prices_trade_date  ON stock_prices(trade_date);
 CREATE INDEX IF NOT EXISTS idx_us_stock_prices_trade_date ON us_stock_prices(trade_date);
+CREATE INDEX IF NOT EXISTS idx_ai_model_prediction_runs_market_run_at ON ai_model_prediction_runs(market, run_at DESC);
 """
 
 
@@ -137,6 +151,8 @@ def create_schema() -> None:
             logging.info("%s table created (or already exists)", ARTICLE_LABELS_TABLE)
             cur.execute(CREATE_STOCK_PRICES)
             logging.info("stock_prices table created (or already exists)")
+            cur.execute(CREATE_AI_MODEL_PREDICTION_RUNS)
+            logging.info("%s table created (or already exists)", AI_MODEL_PREDICTION_RUNS_TABLE)
             cur.execute(CREATE_INDEXES)
             logging.info("Indexes created (or already exist)")
 

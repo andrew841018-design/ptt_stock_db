@@ -20,12 +20,12 @@
   python cmd.py reparse
   python cmd.py mongo
 
-  # Backtest（分層測試）
-  python cmd.py backtest fetch-sentiment tw        # 只測情緒 DB 查詢
-  python cmd.py backtest fetch-sentiment us
-  python cmd.py backtest fetch-price tw            # 只測股價 DB 讀取
-  python cmd.py backtest fetch-price us
-  python cmd.py backtest run tw|us|all             # 完整回測
+  # AI 模型預測（分層測試）
+  python cmd.py ai-predict fetch-sentiment tw      # 只測情緒 DB 查詢
+  python cmd.py ai-predict fetch-sentiment us
+  python cmd.py ai-predict fetch-price tw          # 只測股價 DB 讀取
+  python cmd.py ai-predict fetch-price us
+  python cmd.py ai-predict run tw|us|all           # 完整預測
 
   # Reddit 歷史批次載入
   python cmd.py reddit-batch                       # 全歷史
@@ -135,7 +135,7 @@ def _cmd_mongo(_args):
         logging.info("[MongoDB] 連線成功，raw_responses：%d 筆", count)
 
 
-# ─── Backtest（分層） ──────────────────────────────────────────────────────────
+# ─── AI 模型預測（分層） ──────────────────────────────────────────────────────
 
 _MARKET_SOURCES = {
     "tw": ["ptt", "cnyes"],
@@ -148,8 +148,8 @@ _MARKET_PRICES_TABLE = {
 }
 
 
-def _cmd_backtest(args):
-    from backtest import fetch_sentiment, fetch_price, run_backtest
+def _cmd_ai_predict(args):
+    from ai_model_prediction import fetch_sentiment, fetch_price, run_ai_model_prediction
     from datetime import date, timedelta
 
     action = args.action
@@ -158,21 +158,21 @@ def _cmd_backtest(args):
     if action == "fetch-sentiment":
         sources = _MARKET_SOURCES[market]
         df = fetch_sentiment(sources)
-        logging.info("[Backtest] fetch-sentiment %s：%d 天，avg_sentiment 非 NULL %d 筆",
+        logging.info("[AI Prediction] fetch-sentiment %s：%d 天，avg_sentiment 非 NULL %d 筆",
                      market, len(df), df["avg_sentiment"].notna().sum())
 
     elif action == "fetch-price":
         prices_table = _MARKET_PRICES_TABLE[market]
         end = (date.today() + timedelta(days=1)).isoformat()
         df = fetch_price(prices_table, "2023-01-01", end)
-        logging.info("[Backtest] fetch-price %s（%s）：%d 天", market, prices_table, len(df))
+        logging.info("[AI Prediction] fetch-price %s（%s）：%d 天", market, prices_table, len(df))
 
     elif action == "run":
         if market == "all":
-            run_backtest("tw")
-            run_backtest("us")
+            run_ai_model_prediction("tw")
+            run_ai_model_prediction("us")
         else:
-            run_backtest(market)
+            run_ai_model_prediction(market)
 
 
 # ─── Reddit 批次 ───────────────────────────────────────────────────────────────
@@ -222,14 +222,14 @@ def main():
     sub.add_parser("reparse", help="從 MongoDB re-parse 修復資料")
     sub.add_parser("mongo",   help="MongoDB 連線測試")
 
-    # Backtest
-    p_bt = sub.add_parser("backtest", help="Walk-Forward 回測（可分層測試）")
-    p_bt.add_argument(
+    # AI 模型預測
+    p_ai = sub.add_parser("ai-predict", help="Walk-Forward AI 模型預測（可分層測試）")
+    p_ai.add_argument(
         "action",
         choices=["fetch-sentiment", "fetch-price", "run"],
-        help="fetch-sentiment / fetch-price：單層測試；run：完整回測",
+        help="fetch-sentiment / fetch-price：單層測試；run：完整預測",
     )
-    p_bt.add_argument(
+    p_ai.add_argument(
         "market",
         nargs="?",
         choices=["tw", "us", "all"],
@@ -259,7 +259,7 @@ def main():
         "ge":        _cmd_ge,
         "reparse":   _cmd_reparse,
         "mongo":     _cmd_mongo,
-        "backtest":  _cmd_backtest,
+        "ai-predict": _cmd_ai_predict,
         "reddit-batch": _cmd_reddit_batch,
     }
     dispatch[args.command](args)

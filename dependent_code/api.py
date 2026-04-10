@@ -60,6 +60,20 @@ class SentimentVsStockPriceResponse(BaseModel):
     period: int
     data: list[SentimentVsStockPriceItem]
 
+class AIModelPredictionDailyPoint(BaseModel):
+    date: datetime.date
+    strategy_cumulative_return: float   # 1.025 = +2.5%
+    buy_and_hold_return: float
+
+class AIModelPredictionResponse(BaseModel):
+    market: str
+    display_name: str
+    accuracy: float
+    strategy_cumulative_return: float   # 最終值（1.025 = +2.5%）
+    buy_and_hold_return: float
+    sample_days: int
+    daily: list[AIModelPredictionDailyPoint]
+
 class HealthResponse(BaseModel):
     status: str
     message: str
@@ -241,6 +255,35 @@ def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=
         raise HTTPException(status_code=404, detail={"message": "查無資料，mart_daily_summary 可能尚未刷新"})
 
     return {"period": period, "data": df.to_dict(orient="records")}
+
+
+@app.get("/ai_model_prediction/{market}", response_model=AIModelPredictionResponse)
+def get_ai_model_prediction(market: str, user: dict = Depends(verify_token)) -> AIModelPredictionResponse:
+    """
+    Walk-Forward AI 模型預測結果。即時重算，不走快取（MLflow + ai_model_prediction_runs 有歷史）。
+    市場：tw（0050）/ us（VOO）
+    """
+    if market not in ("tw", "us"):
+        raise HTTPException(status_code=400, detail={"message": "market must be 'tw' or 'us'"})
+
+    # lazy import：ai_model_prediction 拖 sklearn + torch，放 module-level 會拖慢 FastAPI 啟動
+    from ai_model_prediction import run_ai_model_prediction, MARKET_CONFIG
+    df = run_ai_model_prediction(market)
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail={"message": f"No AI model prediction result for {market}"})
+
+    daily = df[["date", "strategy_cumulative_return", "buy_and_hold_return"]].copy()
+    daily["date"] = pd.to_datetime(daily["date"]).dt.date
+
+    return {
+        "market":                     market,
+        "display_name":               MARKET_CONFIG[market]["display_name"],
+        "accuracy":                   float((df["true"] == df["pred"]).mean()),
+        "strategy_cumulative_return": float(df["strategy_cumulative_return"].iloc[-1]),
+        "buy_and_hold_return":        float(df["buy_and_hold_return"].iloc[-1]),
+        "sample_days":                len(df),
+        "daily":                      daily.to_dict(orient="records"),
+    }
 
 
 @app.get("/health", response_model=HealthResponse)
