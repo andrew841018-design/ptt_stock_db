@@ -27,3 +27,4 @@ pymongo
 pyarrow
 gspread
 python-jose[cryptography]
+mlflow

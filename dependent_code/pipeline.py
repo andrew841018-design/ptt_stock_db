@@ -18,7 +18,7 @@ from stock_matcher import run_matcher
 from dw_etl import run_etl
 from looker_export import main as run_looker_export
 from backup import backup_database
-from backtest import run_backtest
+from ai_model_prediction import run_ai_model_prediction
 from mongo_helper import ensure_indexes
 
 # stream=sys.stdout：logging 寫 stdout，tqdm 保持 stderr，redirect 時乾淨分離
@@ -148,12 +148,12 @@ def run_pipeline() -> None:
     except Exception as e:
         logging.warning(f"[Backup] 失敗（不中止 pipeline）：{e}")
 
-    # Step 9：回測（情緒 vs 隔日漲跌，Walk-Forward Validation）
+    # Step 9：AI 模型預測（情緒 vs 隔日漲跌，Walk-Forward Validation）
     try:
-        run_backtest("tw")
-        run_backtest("us")
+        run_ai_model_prediction("tw")
+        run_ai_model_prediction("us")
     except Exception as e:
-        logging.warning(f"[Backtest] 失敗（不中止 pipeline）：{e}")
+        logging.warning(f"[AI Prediction] 失敗（不中止 pipeline）：{e}")
 
     logging.info("[Pipeline] 全部完成")
 

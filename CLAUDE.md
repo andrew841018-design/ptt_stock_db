@@ -55,7 +55,7 @@ project/
 │   ├── ge_validation.py      # Great Expectations 驗證
 │   ├── test_api.py           # pytest 自動測試
 │   ├── backup.py             # S3 備份
-│   ├── backtest.py           # Walk-Forward 回測（情緒 vs 隔日漲跌，RandomForest）
+│   ├── ai_model_prediction.py # Walk-Forward AI 模型預測（情緒 vs 隔日漲跌，RandomForest）
 │   ├── cmd.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
 │   └── requirements.txt
 ├── scripts/
@@ -104,9 +104,9 @@ project/
 - [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
 - [x] PII masking（pii_masking.py 實作完成，整合進 pipeline.py）
 - [x] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
-- [x] backtest.py 整合進 pipeline（Step 9）
+- [x] ai_model_prediction.py（原 backtest.py）整合進 pipeline（Step 9）
 - [x] cmd.py 建立（統一 CLI 入口，16 個指令，支援分層測試）
-- [x] 所有 `__main__` 集中到 cmd.py（schema / QA / ge / reparse / mongo / bert / backtest / reddit_batch_loader）
+- [x] 所有 `__main__` 集中到 cmd.py（schema / QA / ge / reparse / mongo / bert / ai-predict / reddit_batch_loader）
 - [x] 各檔案舊執行方式註解清除
 - [ ] JWT Authentication
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
@@ -829,7 +829,7 @@ project/
 | Data Mart 實作 | `data_mart.py` 新建 + `dw_schema.py` 加入 `mart_daily_summary` / `mart_hot_stocks` table + partial index |
 | Materialized View 移除 | `mv_daily_summary` / `mv_hot_stocks` 移除，改用 Data Mart table（更貼近業界 104 JD 用語，可跨 DB 移植） |
 | `dw_etl.py` 更新 | `refresh_views()` 移除，改呼叫 `data_mart.refresh_all()`（TRUNCATE + INSERT） |
-| `backtest.py` 新建 | 回測系統：yfinance 抓 0050/VOO 歷史股價 → 情緒 vs 隔日漲跌 → RandomForest Walk-Forward Validation → 累積報酬曲線 |
+| `backtest.py` 新建 | 回測系統：yfinance 抓 0050/VOO 歷史股價 → 情緒 vs 隔日漲跌 → RandomForest Walk-Forward Validation → 累積報酬曲線（後於 2026-04-10 rename 為 `ai_model_prediction.py`） |
 | `fetch_etf_holdings.py` 新建 | TW 50 支（TWSE API）+ US 503 支（Wikipedia S&P 500） |
 | `stock_dict.json` 更新 | TW 50 支、US 503 支，供 NER 使用 |
 | Spark 移除 | `spark_analysis.py` 刪除、`pyspark` 從 requirements.txt 移除（待上完課再實作） |
@@ -1040,7 +1040,7 @@ MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 tabl
 - `sentiment_scores`：122000 筆（約 12.4% 完成；剩下的由背景 BERT inference 補）
 - `labels`：0 筆（未開工 → f1 / confusion matrix / BERT fine-tune 全部 blocked）
 - 背景 BERT inference 速度約 500 筆 / min，預估 28 小時補完剩下 858k 筆
-- Walk-Forward backtest 系統（`backtest.py`）已完成但同樣在等 sentiment 補齊
+- Walk-Forward AI 模型預測系統（當時為 `backtest.py`，現 `ai_model_prediction.py`）已完成但同樣在等 sentiment 補齊
 
 #### 完成項目（CI/CD 修復 + EC2 現況診斷）
 

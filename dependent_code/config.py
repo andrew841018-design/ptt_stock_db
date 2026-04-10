@@ -76,4 +76,5 @@ SOURCES_TABLE = "sources"
 STOCK_PRICES_TABLE    = "stock_prices"     # Tracked symbol: 0050 (Yuanta Taiwan 50); see schema.py
 US_STOCK_PRICES_TABLE = "us_stock_prices"  # Tracked symbol: VOO (Vanguard S&P 500 ETF); see schema.py
 ARTICLE_LABELS_TABLE  = "article_labels"   # Human-labeled sentiment (labeling_tool.py -> bert_sentiment.py fine-tune)
+AI_MODEL_PREDICTION_RUNS_TABLE = "ai_model_prediction_runs"  # Walk-Forward AI model prediction run history (model drift analysis)
 
