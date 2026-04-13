@@ -10,7 +10,7 @@ s3 = boto3.client('s3')
 
 
 def backup_database():
-    timestamp = datetime.now().strftime("%Y%m%d%H%M")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     s3_key    = f'backup_{timestamp}.sql'
     dump_path = f'/tmp/backup_{timestamp}.sql'
 

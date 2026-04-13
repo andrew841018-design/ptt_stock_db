@@ -58,12 +58,17 @@ def test_get_today_sentiment(mock_fixture, expected, request):
     request.getfixturevalue(mock_fixture)
     response = client.get("/sentiments/today")
     assert response.status_code in expected
+    if response.status_code == 200:
+        assert "date" in response.json()
+        assert "sentiment_score" in response.json()
 
 @pytest.mark.parametrize("mock_fixture,expected", STANDARD_CASES)
 def test_get_change_sentiment(mock_fixture, expected, request):
     request.getfixturevalue(mock_fixture)
     response = client.get("/sentiments/change")
     assert response.status_code in expected
+    if response.status_code == 200:
+        assert "change_sentiment_score" in response.json()
 
 @pytest.mark.parametrize("mock_fixture,expected", STANDARD_CASES)
 def test_get_recent_sentiment_score(mock_fixture, expected, request):
@@ -72,6 +77,9 @@ def test_get_recent_sentiment_score(mock_fixture, expected, request):
     for period in [PERIOD_MIN, PERIOD_MAX]:
         response = client.get(f"/sentiments/recent?period={period}")
         assert response.status_code in expected, f"period: {period}"
+        if response.status_code == 200:
+            assert "period" in response.json()
+            assert "sentiment_score" in response.json()
     # incorrect request
     response = client.get(f"/sentiments/recent?period={PERIOD_MIN - 1}")
     assert response.status_code == 422
@@ -86,6 +94,9 @@ def test_get_top_push_articles(mock_fixture, expected, request):
         for period in [ARTICLE_PERIOD_MIN, ARTICLE_PERIOD_MAX]:
             response = client.get(f"/articles/top_push?limit={limit}&period={period}")
             assert response.status_code in expected, f"limit: {limit}, period: {period}"
+            if response.status_code == 200:
+                assert "limit" in response.json()
+                assert "articles" in response.json()
     # incorrect request
     response = client.get(f"/articles/top_push?limit={ARTICLE_LIMIT_MIN - 1}")
     assert response.status_code == 422

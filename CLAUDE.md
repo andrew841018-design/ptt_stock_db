@@ -31,11 +31,15 @@ project/
 │   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
 │   ├── cache_helper.py       # Redis Cache-Aside helper
 │   ├── scrapers/
-│   │   ├── __init__.py       # sys.path 統一設定
-│   │   ├── base_scraper.py   # 爬蟲抽象父類別
-│   │   ├── ptt_scraper.py    # PTT Stock 板爬蟲
-│   │   ├── cnyes_scraper.py  # 鉅亨網爬蟲
-│   │   └── twse_fetcher.py   # 0050 股價抓取（TWSE API）
+│   │   ├── __init__.py           # sys.path 統一設定
+│   │   ├── base_scraper.py       # 爬蟲抽象父類別（含 module-level get_with_retry）
+│   │   ├── ptt_scraper.py        # PTT Stock 板爬蟲
+│   │   ├── cnyes_scraper.py      # 鉅亨網爬蟲
+│   │   ├── reddit_scraper.py     # Reddit 財經版增量爬蟲
+│   │   ├── reddit_batch_loader.py  # Reddit 歷史大量資料載入器（Arctic Shift API）
+│   │   ├── scraper_schemas.py    # Pydantic 資料驗證 schema
+│   │   ├── tw_stock_fetcher.py   # 0050 股價抓取（TWSE API）
+│   │   └── us_stock_fetcher.py   # VOO 股價抓取（yfinance）
 │   ├── api.py                # FastAPI REST API
 │   ├── visualization.py      # Streamlit 儀表板
 │   ├── plt_function.py       # matplotlib 圖表函式
@@ -81,10 +85,17 @@ project/
 - [x] AWS CLI 安裝與設定
 - [x] Phase 4：遷移腳本（SQLite → PostgreSQL）完成（migrate.py）
 - [x] Phase 4：psycopg2 連線（pg_helper.py 已實作）
+- [x] `_get_with_retry` 恢復為 BaseScraper 實例方法，四支爬蟲全改回 `self._get_with_retry()`
+- [x] `schema.py` 追蹤標的標註（stock_prices: 0050；us_stock_prices: VOO）
+- [x] PTT pipeline 背景執行（PID 61194，爬 10000 頁）
+- [x] Arctic Shift pipeline 背景執行（PID 95637，6 subreddits 歷史資料）
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
 - [ ] PII masking（author hash 化）
 - [ ] JWT Authentication
 - [ ] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
-- [ ] Phase 6：Airflow、BERT、CI/CD 進階
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
 
 ---
 
@@ -545,6 +556,7 @@ project/
 - **@abstractmethod 是框架，不是實作**：base class 只定義「要有什麼方法、回傳什麼格式」，實際邏輯在子類別；base 的空殼永遠不會被執行
 - **Python import 時掃描 class 結構**：不用執行任何方法，import 時就已知道哪些 abstractmethod 有沒有被實作；沒實作 → 建立物件時直接報錯
 - **base class 的分工**：子類別負責「怎麼爬」（get_source_info / fetch_articles），base 負責「怎麼存」（run / _save_to_db / _insert_*）；新增來源只要加子類別，DB 邏輯完全不用動
+- **父類別同時有兩種方法**：`@abstractmethod` = 規格，子類別必須實作；一般方法（`_load_urls` / `_save_to_db` / `_get_with_retry`）= 父類別已實作好，子類別直接繼承使用，不需要重寫
 - **繼承語法 `class 子類別(父類別)`**：擁有父類別所有方法 + 必須實作父類別的 abstractmethod；沒有括號就是普通 class，跟父類別完全無關
 - **push_count 設計修正**：cnyes 無推文數，改為明確回傳 `None`（語意正確），schema 改為 `INTEGER`（允許 NULL），base_scraper 用 `.get('push_count')` 取值
 - **comments 設計修正**：`_insert_comments` 改為 `if article.get('comments')` 才呼叫，不再靠空 list 默默跳過
@@ -561,6 +573,193 @@ project/
 
 #### 下次繼續
 
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+
+---
+
+### 2026-04-03（下午）
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| Pydantic response model | api.py 所有 endpoint 加上 `response_model=`，Swagger 自動產生文件，過濾多餘欄位 |
+| API 動態 key 改為固定 key | `/sentiments/recent` → `{period, sentiment_score}`；`/articles/top_push` → `{limit, articles}` |
+| scraper_schemas.py 新建 | 爬蟲入庫前 Pydantic 驗證：title 非空、url regex、push_count -100~100、published_at 非未來 |
+| Optional[X] → X \| None | 全專案統一改為 Python 3.10+ 語法，移除 `from typing import Optional` |
+| test_api.py 補強 | 所有 endpoint 的 200 response 加上 body key 驗證 |
+| update 定義更新 | code review 環節改為自我迭代 10 次無錯才停 |
+| 繼續指令定義 | 說「繼續」→ 按照 daily_guide_v2.html 順序推進下一個任務 |
+| Bug fix：api.py DataFrame mutation | `get_top_push_articles` 改 `df = df.copy()` 防止共享快取物件被污染 |
+| Bug fix：ptt_scraper X 前綴推文數 | `X1=-1` 錯誤 → 改為 `X1=-10`（乘以 10），與 PTT 規格一致 |
+| Bug fix：ptt_scraper _parse_push_count | 無效 push_count 不再 raise ValueError 崩潰，改為 log warning + return None |
+| Bug fix：cnyes_scraper publishAt | 改用 `item.get()` + early return None，防止 publishAt 缺失時 KeyError |
+| Bug fix：visualization.py NaN delta | yesterday 無資料時 change_score 改顯示 0，不再傳 NaN 給 st.metric |
+
+#### 學到的概念
+
+- **Pydantic BaseModel**：用 class 定義資料結構，FastAPI 自動驗證 response 型別、過濾多餘欄位、產生 Swagger 文件
+- **response_model=**：endpoint 的合約，告訴 FastAPI 這個 endpoint 應該回傳什麼格式
+- **`extra: allow`**：允許 model 有靜態定義以外的 key，適合動態 key 場景；但代價是失去型別保護，能避則避
+- **API breaking change**：key 名稱改變會讓呼叫方靜默壞掉，趁未對外公開前改好
+- **`list[X]`**：list 裡每個元素都要符合 X 型別，Pydantic 逐一驗證；vs `list` 不驗證內容
+- **`@field_validator("欄位名")`**：指定這個 validator 對哪個欄位生效，不加裝飾器 validator 不會被呼叫
+- **`@classmethod`**：Pydantic v2 規定 field_validator 必須是 classmethod，`cls` 是固定語法但實際用不到
+- **validator 參數命名**：`v` 是舊慣例，直接用欄位名（`title`、`url`）更直觀
+- **`int | None`**：Python 3.10+ Union 型別，等同 `Optional[int]`，更簡潔
+- **scraper_schemas.py 驗證失敗 return None**：在 for loop 裡，None 讓這篇跳過繼續爬下一篇；raise 會中斷整個爬蟲
+
+#### 下次繼續
+
+- [ ] 按 daily_guide_v2.html 繼續推進（說「繼續」自動接續）
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：BERT 情緒分析實作（bert_sentiment.py，config.py 框架已就位）
+- [ ] Phase 5：資料倉儲（星型 schema）
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-04
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| Git history rewrite | 16 → 14 commits；commit message 移除 `[PhaseX·xxx]` 前綴，改為乾淨格式 |
+| Git tags 建立 | 每個 commit 標上對應任務的 annotated tag，tag 名稱直接取自 daily_guide_v2.html 任務名 |
+| key_word.md 新建 | 人類可讀的關鍵字速查文件（update / git / 繼續），每次 update 同步 |
+| Commit Tag 對照表 | 加入 readme.md，列出 Phase1~Phase4 所有已實作任務的 tag 對照 |
+| `git` 關鍵字升級 | 新增步驟：①主動讀 HTML 判斷是否完成任務並建議 tag ②檢查近期 commit 是否有應合併的，兩個判斷都等使用者確認才執行 |
+| `_get_with_retry` 恢復 | BaseScraper 加回 `_get_with_retry` 實例方法（委派給 module-level `get_with_retry()`）；ptt / cnyes / reddit / arctic_shift 四支爬蟲全部改回 `self._get_with_retry()`，多餘的 import 移除 |
+| `schema.py` 追蹤標的標註 | `stock_prices` 和 `us_stock_prices` 的 DDL 前加上 SQL comment，說明各自追蹤 0050（元大台灣50）和 VOO（Vanguard S&P 500 ETF） |
+| PTT pipeline 啟動 | PID 61194，爬 10000 頁，背景執行中 |
+| Arctic Shift pipeline | PID 95637，背景執行中（6 subreddits 歷史資料） |
+| code review bug fix | `visualization.py` import `TWSE_STOCK_NAME` 但 config.py 未定義 → 補上 `TWSE_STOCK_NO` 和 `TWSE_STOCK_NAME`；`pydantic` 未列入 requirements.txt → 補上 |
+
+#### 學到的概念
+
+- **`git tag` vs commit message prefix**：tag 是獨立的 git ref，指向某個 commit；`[PhaseX·xxx]` 只是 message 文字，兩者完全不同
+- **`git tag -a`**：annotated tag，有獨立的 tag 物件（含訊息、時間戳），比 lightweight tag 更完整
+- **`git push origin :refs/tags/tagname`**：刪除遠端 tag（`:` 前為空代表推送「空」覆蓋遠端）
+- **`git tag --points-at <hash>`**：列出某個 commit 上的所有 tag
+- **git tag 唯一性**：同一個 tag 名稱只能指向一個 commit；需要移動 tag 時要先 `git tag -d` 再重建
+- **純 docs commit 不應單獨存在**：沒有完成任何任務 → 無法加 tag → 應與下一個有意義的 commit 合併後再 push
+- **`git commit-tree`**：低階指令，直接建立 commit 物件（tree + parent + message），不依賴 working tree 狀態，適合腳本化 history rewrite
+- `_get_with_retry` 作為實例方法存在的原因：BaseScraper 子類別用 `self._get_with_retry()` 是 OOP 慣例，也讓子類別未來可以覆寫 retry 行為；module-level `get_with_retry()` 則給不繼承 BaseScraper 的類別（如 `tw_stock_fetcher`）直接 import 使用
+- SQL comment 寫法：`-- 這是 SQL 單行 comment`，可寫在 DDL 字串裡，`psycopg2` 執行時不影響
+- config.py 邊界原則補充：像 `TWSE_STOCK_NAME` 這類圖表顯示用的常數，雖然只有 visualization 用，但來源是 config 追蹤的標的，應放 config 而非 hardcoded 在 visualization
+
+#### Architecture note
+
+- `base_scraper.py`：module-level `get_with_retry()` → `BaseScraper._get_with_retry()` 委派它
+- 四支爬蟲（ptt / cnyes / reddit / arctic_shift）：`self._get_with_retry()`
+- `tw_stock_fetcher.py`：直接 `from scrapers.base_scraper import get_with_retry`（不繼承 BaseScraper）
+
+#### 完成項目（code review 2026-04-04）
+
+| 項目 | 說明 |
+|------|------|
+| `reddit_batch_loader.py` 修正 | 移除 `"title": title or url` fallback，改為 `"title": title`，讓 ArticleSchema 的 `title_not_empty` validator 正確攔截空 title；reddit_scraper.py 同步修正 |
+| `sys.argv` 說明 | `reddit_batch_loader.py` `__main__` 加上 `sys.argv[0/1/2]` 說明註解 |
+
+#### 學到的概念（code review 2026-04-04）
+
+- `title or url` 反模式：讓 fallback 繞過 schema 驗證，問題資料悄悄存進 DB；正確做法是讓 ArticleSchema validator 攔截並 log warning
+- `push_count = max(-100, min(100, score))`：clamp 把 Reddit 無上限 score 壓進 -100~100，與 PTT push_count 欄位設計保持一致；ArticleSchema 的 `push_count_in_range` validator 作為第二道防線
+- `post.get("score", 0) or 0`：雙重保護，`.get("score", 0)` 處理 key 不存在，`or 0` 處理 key 存在但值為 `None`（JSON null）
+- `sys.argv`：`argv[0]` = 腳本名稱，`argv[1]`、`argv[2]` = 使用者傳入的命令列參數；`len(sys.argv) == 3` 表示使用者傳了兩個日期參數（補抓指定區間用）
+
+#### 下次繼續
+
+- [ ] `41cd8ad`（純 docs commit）下次有新 commit 時合併進去
+- [x] `reddit_batch_loader.py` title fallback 移除（`title or url` 反模式）
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料（us_stock_prices 目前為空，QA 會 FAIL）
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：BERT 情緒分析實作（bert_sentiment.py，config.py 框架已就位）
+- [ ] Phase 5：資料倉儲（星型 schema）
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-04（下午）
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| 多來源 ETL 整合 | pipeline.py 改用 `concurrent.futures.ThreadPoolExecutor` 並行爬取，ETL 三階段明確分層（`extract()` / `transform()`），新增來源只需在 `_ALL_SOURCES` 加一行 |
+| Bug fix：`str\|None` Python 3.9 不相容 | `Optional[X] → X\|None` 語法只支援 3.10+，導致 cnyes scraper 靜默失敗 0 篇；修復 5 個檔案改回 `Optional[X]` |
+| `update` 關鍵字升級 | 新增第一步：讀最新 log 掃 ERROR/WARNING/Traceback，有問題先修 |
+| git 關鍵字升級 | 每次 push 前審查所有 unpushed commits，判斷是否 soft reset 合併（目標每筆都有 tag）|
+
+#### 學到的概念
+
+- **`str | None` 是 Python 3.10+ 語法（PEP 604）**：Python 3.9 執行 `str | None` 會 `TypeError: unsupported operand type(s) for |`，Pydantic 在 class 定義時就會觸發，導致整個模組 import 失敗
+- **`Optional[X]` vs `X | None`**：功能等價，`Optional[X]` 是 `Union[X, None]` 的縮寫，適用 3.9；`X | None` 更簡潔但只限 3.10+
+- **爬蟲靜默失敗的危險性**：import 失敗不會 raise 到 pipeline 層（因為 `except requests.RequestException` 只抓網路錯誤），導致 0 篇但沒有 ERROR log，只靠 DB 筆數才能發現
+- **`concurrent.futures.ThreadPoolExecutor`**：I/O bound 任務用 thread（等 HTTP response），比 ProcessPoolExecutor 啟動快；`as_completed()` 拿到最先完成的 future，適合多來源並行
+
+#### 下次繼續
+
+- [ ] `41cd8ad`（純 docs commit）下次有新 commit 時合併進去
+- [ ] cnyes 實際跑一次確認資料寫入
+- [ ] Phase 4：Star Schema / Data Warehouse
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] Phase 5：BERT 情緒分析
+
+---
+
+### 2026-04-05
+
+#### 完成項目（2026-04-05 上午）
+
+| 項目 | 說明 |
+|------|------|
+| `reddit_scraper.py` 重構 | `_PAGE_LIMIT = 100` 常數化；walrus operator 改為 explicit for loop；`consecutive_dup_pages` → `consecutive_empty_pages` |
+| `us_stock_fetcher.py` 重構 | `iterrows` + `get_loc` 改用 `shift(1)` 向量化計算 change；補上 `import pandas as pd` |
+
+#### 學到的概念（2026-04-05 上午）
+
+- `shift(1)`：把整欄往下移一格，自動對齊前一天；第一筆變 NaN；取代逐列計算前後差的迴圈
+- `iterrows()`：逐列遍歷 DataFrame，每次給 `(idx, row)`；`idx` 是 index（縱軸），`row["欄位"]` 是橫向取值
+- `NaN` vs `None`：NaN 是 pandas/numpy 的缺失值（特殊浮點數）；None 是 Python 空值；psycopg2 只認識 None，看到 None 自動轉 DB NULL，NaN 會報錯
+- `pd.isna()`：判斷是否為 NaN，配合三元運算子轉成 None 再存 DB
+- `items()`：DataFrame 逐欄遍歷（對應 iterrows 的逐列），實務上少用，直接 `df["欄位"]` 更常見
+- magic number 原則：API 硬性上限（如 Reddit `_PAGE_LIMIT = 100`）應定義為模組級常數，加註說明不可超過的原因
+
+#### 完成項目（2026-04-05 下午）
+
+| 項目 | 說明 |
+|------|------|
+| Git 清理 | main 推送完成（f742d45 Phase4·Pydantic驗證）；`big_data_etl` worktree + branch + remote 全部刪除；`Phase4·多來源ETL` tag 砍掉（指向錯誤 commit）；claude/ 殘留 branch 清除 |
+| `pipeline.py` 升級 | ThreadPoolExecutor 並行版本修正上線：修正 import 路徑（`tw_stock_fetcher`）、補上 `RedditScraper` + `UsStockFetcher`、tqdm 改為 logging |
+| `base_scraper.py` bug fix | `_get_or_create_source` 改為 INSERT ON CONFLICT DO NOTHING → SELECT 模式，解決 ThreadPoolExecutor 並行時 race condition |
+| `base_scraper.py` bug fix | `raise e` → `raise`，保留完整 traceback |
+| `cnyes_scraper.py` fix | title 加 `.strip()`，與其他來源保持一致 |
+| `requirements.txt` fix | 移除重複的 `pydantic` 條目 |
+| pipeline 啟動 | PID 24096，PTT 10000 頁爬取中；Arctic Shift PID 95637 歷史載入中 |
+
+#### 學到的概念（2026-04-05 下午）
+
+- `git worktree`：branch 被 worktree 使用時無法直接砍，需先 `git worktree remove` 再 `git branch -D`
+- `git branch -a` 的 `+` 前綴：代表該 branch 是某個 worktree 的 checked-out branch
+- `git worktree prune`：清除已不存在目錄的 worktree 紀錄（prunable 狀態）
+- `git fsck --unreachable | grep commit`：找回已 drop 的 stash 或被 reset 蓋掉的 commit（git GC 前都還在）
+- `ON CONFLICT DO NOTHING RETURNING`：INSERT 成功時回傳 row，衝突時不 raise 只是靜默跳過、RETURNING 為空；需搭配 fallback SELECT 才能取到已存在的 id
+- `raise e` vs `raise`：`raise e` 會重置 traceback 起點（看起來 exception 從這裡發生）；`raise` 保留完整 traceback（真正的錯誤位置）；99% 情況用 `raise`
+- ThreadPoolExecutor race condition：多個 thread 同時通過 SELECT 判斷「不存在」→ 同時 INSERT → 第二個 INSERT 觸發 unique constraint；解法是讓 DB 自己處理（ON CONFLICT），而非在 application 層做 TOCTOU 判斷
+
+#### 下次繼續
+
+- [ ] pipeline 跑完確認各來源資料量（PTT / cnyes / Reddit / TWSE / VOO）
+- [ ] Arctic Shift PID 95637 確認狀態（big_data_etl 目錄已刪，process 是否還正常）
+- [ ] `Phase4·多來源ETL` tag 等 pipeline.py ThreadPoolExecutor 確認無誤後重打
 - [ ] PII masking（author hash 化）
 - [ ] JWT Authentication
 - [ ] Phase 5：BERT 情緒分析實作（bert_sentiment.py，config.py 框架已就位）
@@ -587,4 +786,5 @@ project/
 
 | 關鍵字 | 用途 |
 |--------|------|
-| `update` | 執行前先對整個 project 做一次 code review（讀取所有 `.py` 與 `.yml` 檔案，確認無功能性問題）。review 完畢後，自動讀取並同步更新三個文件（`CLAUDE.md`、`readme.md`、`project_notes.md`），將最新完成項目、進度清單、學到的概念等寫入，並回報各檔案的變動內容。同時檢查所有 `.py` 檔案的 import，確認有無未列入 `requirements.txt` 的套件，若有則補上 |
+| `update` | 1. 讀取 `logs/` 最新的 log 檔，掃描 ERROR / WARNING / Traceback，若有問題立即修正 code 2. 檢查 `logs/` 檔案數量，超過 30 個則刪除最舊的，只保留最新 30 個 3. 對整個 project 做自我迭代 code review：逐行自問自答，發現問題立即修正，修正後重新從頭檢查，直到連續 10 次迭代都沒有發現任何問題才停止 4. 同步更新四個文件（`CLAUDE.md`、`readme.md`、`project_notes.md`、`key_word.md`），將最新完成項目、進度清單、學到的概念等寫入 5. 檢查所有 `.py` 檔案的 import，確認有無未列入 `requirements.txt` 的套件，若有則補上 |
+| `git` | 1. 執行 `git status` 和 `git diff` 查看當前所有未 stage 的變更 2. 逐一閱讀變更內容，對照 `readme.md` 的 Commit Tag 對照表，判斷屬於哪個任務，生成完整 commit message 給使用者看 3. **逐一審查所有 unpushed commits（含本次要 commit 的）**：對每一筆確認是否已有 tag、內容是否足以獨立成一筆，找出無 tag、純文件、WIP、或同任務零散的 commit 4. 判斷是否需要 soft reset 合併：把無法單獨加 tag 的 commit 合併進有意義的 commit，目標是每一筆 unpushed commit 都能對應到一個 tag；說明建議（哪幾筆合併、合併後的 message）5. 判斷是否新增 git tag：**主動讀取 `daily_guide_v2.html`**，逐一比對每筆 commit 的改動與任務清單，說明每筆要加哪個 tag 或不需要加（+理由）6. 步驟 3、4、5 的判斷一次列出，等使用者確認後才執行 7. 確認後：stage → commit；若需合併則先 soft reset → 重新 commit；打上 tag → push commits → push tags |

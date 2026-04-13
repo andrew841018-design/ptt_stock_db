@@ -58,7 +58,7 @@ st.pyplot(fig_daily_article_count)
 today     = df[df['Date'] == df['Date'].max()]
 score     = round(today['Article_Sentiment_Score'].mean(), 2)
 yesterday = df[df['Date'] == df['Date'].max() - datetime.timedelta(days=1)]
-change_score = round(score - yesterday['Article_Sentiment_Score'].mean(), 2)
+change_score = round(score - yesterday['Article_Sentiment_Score'].mean(), 2) if not yesterday.empty else 0
 st.metric(label="Today's Sentiment Score", value=score, delta=change_score)
 
 st.subheader("Today's Top 10 Trending Articles")  # 顯示今日前10名熱門文章
@@ -69,13 +69,15 @@ def _kw_model():
     return KeyBERT()
 
 # 關鍵字統計 TOP20（KeyBERT）
-text         = ' '.join(df['Title'].tolist())
-keywords     = _kw_model().extract_keywords(text, keyphrase_ngram_range=(1, 2), top_n=20)
-top_20_words = pd.DataFrame(keywords, columns=['Word', 'Score'])
 st.subheader("Top 20 Keywords")
-st.dataframe(top_20_words)
+if df.empty:
+    st.warning("No data available for keyword analysis")
+else:
+    text         = ' '.join(df['Title'].tolist())
+    keywords     = _kw_model().extract_keywords(text, keyphrase_ngram_range=(1, 2), top_n=20)
+    top_20_words = pd.DataFrame(keywords, columns=['Word', 'Score'])
+    st.dataframe(top_20_words)
 
-# ── 情緒 vs 股價關聯分析 ──────────────────────────────────────────────────
 st.subheader("情緒 vs 股價關聯分析")
 
 @st.cache_data

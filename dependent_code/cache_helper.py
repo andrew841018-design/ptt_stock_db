@@ -9,7 +9,6 @@ from config import REDIS_HOST, REDIS_PORT, REDIS_TTL
 _redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 
-# Optional[pd.DataFrame] means the return value is either a pd.DataFrame or None
 def get_cache(key: str) -> Optional[pd.DataFrame]:
     """從 Redis 取快取，回傳 DataFrame；找不到回傳 None"""
     try:

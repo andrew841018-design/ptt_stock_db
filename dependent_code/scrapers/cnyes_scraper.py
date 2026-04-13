@@ -1,11 +1,13 @@
+import sys
 import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from tqdm import tqdm
 from typing import Optional
+from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES
 
 _SOURCE = SOURCES["cnyes"]
@@ -35,7 +37,7 @@ class CnyesScraper(BaseScraper):
     def fetch_articles(self) -> list:
         articles = []
 
-        for page_num in tqdm(range(1, _SOURCE["num_pages"] + 1), desc="鉅亨網爬蟲頁數"):
+        for page_num in tqdm(range(1, _SOURCE["num_pages"] + 1), desc="鉅亨網爬蟲頁數", file=sys.stderr):
             try:
                 items = self._fetch_news_list(page_num)
                 if not items:
@@ -51,7 +53,6 @@ class CnyesScraper(BaseScraper):
 
         return articles
 
-    # ── 鉅亨網專用 helper ──────────────────────────────────────────────
 
     def _fetch_news_list(self, page: int) -> list:
         """
@@ -89,21 +90,28 @@ class CnyesScraper(BaseScraper):
         """
         news_id      = item.get("newsId")
         html_content = item.get("content") or item.get("summary", "")
-        if not news_id or not html_content:
+        publish_at   = item.get("publishAt")
+        if not news_id or not html_content or not publish_at:
             return None
 
         # HTML → 純文字
         # get_text(separator="\n") 移除所有 HTML 標籤，只保留文字
         content = BeautifulSoup(html_content, "html.parser").get_text(separator="\n").strip()
 
-        return {
+        article = {
             "title":        item.get("title"),
             "content":      content,
             "url":          f"https://news.cnyes.com/news/id/{news_id}",
             "author":       item.get("author"),          # 記者名稱，可能為 None
-            "published_at": datetime.fromtimestamp(
-                                item["publishAt"]        # 鉅亨網時間戳是秒
+            "published_at": datetime.utcfromtimestamp(
+                                item["publishAt"]        # 鉅亨網時間戳是秒，統一轉 UTC
                             ),
             "push_count":   None,  # 新聞無推文數
             "comments":     [],    # 新聞無留言
         }
+        try:
+            ArticleSchema(**article)
+        except Exception as e:
+            logging.warning(f"文章驗證失敗，略過 {article['url']}：{e}")
+            return None
+        return article

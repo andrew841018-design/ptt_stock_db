@@ -47,12 +47,18 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
 """
 
 CREATE_STOCK_PRICES = """
+-- 追蹤標的：0050（元大台灣50）
 CREATE TABLE IF NOT EXISTS stock_prices (
     price_id   SERIAL  PRIMARY KEY,
     trade_date DATE         NOT NULL UNIQUE,
-    open       NUMERIC(10,2),
-    high       NUMERIC(10,2),
-    low        NUMERIC(10,2),
+    close      NUMERIC(10,2),
+    change     NUMERIC(10,2)
+);
+
+-- 追蹤標的：VOO（Vanguard S&P 500 ETF）
+CREATE TABLE IF NOT EXISTS us_stock_prices (
+    price_id   SERIAL PRIMARY KEY,
+    trade_date DATE         NOT NULL UNIQUE,
     close      NUMERIC(10,2),
     change     NUMERIC(10,2)
 );
@@ -60,11 +66,12 @@ CREATE TABLE IF NOT EXISTS stock_prices (
 
 # ─── DDL：建 Index ─────────────────────────────────────────────────────────────
 CREATE_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_articles_published_at  ON articles(published_at);
-CREATE INDEX IF NOT EXISTS idx_articles_source_id     ON articles(source_id);
-CREATE INDEX IF NOT EXISTS idx_comments_article_id    ON comments(article_id);
-CREATE INDEX IF NOT EXISTS idx_sentiment_article_id   ON sentiment_scores(article_id);
-CREATE INDEX IF NOT EXISTS idx_stock_prices_trade_date ON stock_prices(trade_date);
+CREATE INDEX IF NOT EXISTS idx_articles_published_at    ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_articles_source_id       ON articles(source_id);
+CREATE INDEX IF NOT EXISTS idx_comments_article_id      ON comments(article_id);
+CREATE INDEX IF NOT EXISTS idx_sentiment_article_id     ON sentiment_scores(article_id);
+CREATE INDEX IF NOT EXISTS idx_stock_prices_trade_date  ON stock_prices(trade_date);
+CREATE INDEX IF NOT EXISTS idx_us_stock_prices_trade_date ON us_stock_prices(trade_date);
 """
 
 

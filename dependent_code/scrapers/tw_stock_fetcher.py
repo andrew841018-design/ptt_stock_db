@@ -1,11 +1,14 @@
+import sys
 import time
 import logging
-import requests
 from datetime import date
 from dateutil.relativedelta import relativedelta  # 方便做「往前推 N 個月」
 from tqdm import tqdm
+from scrapers.base_scraper import get_with_retry
 from pg_helper import get_pg
-from config import TWSE_STOCK_NO, TWSE_MONTHS, TWSE_SLEEP_INTERVAL, TWSE_TIMEOUT, STOCK_PRICES_TABLE
+from config import TWSE_MONTHS, TWSE_SLEEP_INTERVAL, TWSE_TIMEOUT, STOCK_PRICES_TABLE
+
+_STOCK_NO = "0050"  # 元大台灣50，固定追蹤單一標的
 
 # TWSE 公開 API（不需要 API key）
 # 2024 起官方將 exchangeReport 改為 rwd/zh/afterTrading
@@ -16,10 +19,8 @@ class TwseFetcher:
     """
     台灣證交所（TWSE）股價資料抓取器。
 
-    和 BaseScraper 不同：
-      - TWSE 抓的是「股價時序資料」，不是文章/留言
-      - 寫入獨立的 stock_prices 表，不走 articles/comments 流程
-      - 因此不繼承 BaseScraper，是獨立的 class
+    不繼承 BaseScraper：TWSE 抓的是股價時序資料，不走文章/留言流程。
+    HTTP retry 透過 import get_with_retry 共用，不需要繼承整個 BaseScraper。
 
     資料來源：TWSE 公開 API
       GET https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY
@@ -30,16 +31,15 @@ class TwseFetcher:
     def run(self) -> None:
         """主流程：逐月抓 0050 股價，寫入 DB"""
         months = self._build_month_list()
-        for yyyymmdd in tqdm(months, desc="0050 月份"):
+        for yyyymmdd in tqdm(months, desc="0050 月份", file=sys.stderr):
             try:
                 rows = self._fetch_row_data(yyyymmdd)
                 if rows:
                     self._save(rows)
                 time.sleep(TWSE_SLEEP_INTERVAL)
-            except requests.RequestException as e:
+            except Exception as e:
                 logging.warning(f"TWSE 0050 {yyyymmdd} 請求失敗：{e}，略過")
 
-    # ── helper ──────────────────────────────────────────────────────────
 
     def _build_month_list(self) -> list:
         """
@@ -65,19 +65,16 @@ class TwseFetcher:
               ...
             ]
           }
-        取用 index 0（日期）、3（開盤）、4（最高）、5（最低）、6（收盤）、7（漲跌價差）。
+        取用 index 0（日期）、6（收盤）、7（漲跌價差）。
         每個欄位都是字串，數字含逗號（"1,234.56"），需要清洗。
         """
-        params = {"response": "json", "date": yyyymmdd, "stockNo": TWSE_STOCK_NO}
-        response = requests.get(_API_URL, params=params, timeout=TWSE_TIMEOUT)
-        response.raise_for_status()
+        params = {"response": "json", "date": yyyymmdd, "stockNo": _STOCK_NO}
+        response = get_with_retry(_API_URL, params=params, timeout=TWSE_TIMEOUT)
         data = response.json()
-
         if data.get("stat") != "OK":
             logging.warning(f"TWSE 0050 {yyyymmdd} stat={data.get('stat')}，略過")
             return []
-
-        return data.get("data", [])
+        return data.get("data") or []
 
     def _save(self, rows: list) -> None:
         """將一個月的交易資料寫入 stock_prices 表，重複的 trade_date 自動略過"""
@@ -89,14 +86,11 @@ class TwseFetcher:
                         continue
                     cur.execute(f"""
                         INSERT INTO {STOCK_PRICES_TABLE}
-                            (trade_date, open, high, low, close, change)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                            (trade_date, close, change)
+                        VALUES (%s, %s, %s)
                         ON CONFLICT (trade_date) DO NOTHING
                     """, (
                         trade_date,
-                        self._to_float(row[3]),  # 開盤價
-                        self._to_float(row[4]),  # 最高價
-                        self._to_float(row[5]),  # 最低價
                         self._to_float(row[6]),  # 收盤價
                         self._to_float(row[7]),  # 漲跌價差
                     ))
@@ -120,4 +114,3 @@ class TwseFetcher:
             return float(text.replace(",", ""))
         except (ValueError, AttributeError):
             return None
-
