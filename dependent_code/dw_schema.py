@@ -15,10 +15,13 @@ Snowflake 延伸（dim_source 多一層正規化）：
 - fact_sentiment : 每日每來源情緒聚合事實表
   └ source_name 直接 denormalize 進 fact（DW 讀多寫少，避免 JOIN）
 
-Data Mart（獨立 table，非 Materialized View）：
-- mart_daily_summary : 每日情緒摘要（儀表板用）
+Data Mart（獨立 table，ETL TRUNCATE+INSERT 更新）：
+- mart_daily_summary : 每日情緒摘要（儀表板用，source 粒度）
 - mart_hot_stocks    : 熱門股票排行（API 用）
-  
+
+Materialized View（PostgreSQL 特有，REFRESH MATERIALIZED VIEW 更新）：
+- mv_market_summary  : 市場層級聚合（TW vs US），示範 Snowflake 三表 JOIN
+  └ 與 Data Mart 互補：Mart 是 source 粒度，MV 是 market 粒度
 """
 
 import logging
@@ -113,6 +116,35 @@ CREATE INDEX IF NOT EXISTS idx_mart_daily_date
 """
 
 
+# ─── Materialized View ─────────────────────────────────────────────────────────
+# mv_market_summary：市場層級聚合（TW vs US）
+#   - 展示 Snowflake schema 三表 JOIN（fact → dim_source → dim_market）
+#   - 與 Data Mart 互補：Mart 是 source 粒度，MV 是 market 粒度
+#   - CREATE 時自動填入資料；後續由 dw_etl.py 的 REFRESH MATERIALIZED VIEW 更新
+
+CREATE_MV_MARKET_SUMMARY = """
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_market_summary AS
+SELECT
+    fs.fact_date,
+    dm.market_code,
+    COUNT(DISTINCT ds.source_id)  AS source_count,
+    SUM(fs.article_count)         AS total_articles,
+    AVG(fs.avg_sentiment)         AS avg_sentiment,
+    AVG(fs.avg_push_count)        AS avg_push_count
+FROM fact_sentiment fs
+JOIN dim_source ds ON ds.source_id = fs.source_id
+JOIN dim_market dm ON dm.market_id = ds.market_id
+GROUP BY fs.fact_date, dm.market_code
+WITH NO DATA;
+"""
+
+# REFRESH 前需要 UNIQUE index 才能用 CONCURRENTLY（目前先不用，但索引保留讓查詢更快）
+CREATE_MV_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_market_summary_unique
+    ON mv_market_summary(fact_date, market_code);
+"""
+
+
 def create_dw_schema() -> None:
     """建立 DW 所有資料表、Index 和 Materialized View"""
     conn = None
@@ -141,6 +173,11 @@ def create_dw_schema() -> None:
             logging.info("mart_hot_stocks created (or already exists)")
             cur.execute(CREATE_MART_INDEXES)
             logging.info("Data Mart indexes created (or already exist)")
+            # Materialized View（Snowflake 三表 JOIN 的市場層級聚合）
+            cur.execute(CREATE_MV_MARKET_SUMMARY)
+            logging.info("mv_market_summary created (or already exists)")
+            cur.execute(CREATE_MV_INDEXES)
+            logging.info("MV indexes created (or already exist)")
         conn.commit()
         logging.info("DW schema setup complete")
     except psycopg2.Error as e:

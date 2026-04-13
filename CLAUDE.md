@@ -16,7 +16,7 @@
 
 **PTT 股票板情緒分析系統**
 
-資料流：`爬蟲 → SQLite → 情緒分析 → FastAPI + Streamlit 儀表板`
+資料流：`schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup`
 
 技術棧：Python、SQLite / PostgreSQL、FastAPI、Streamlit、Redis、pytest、GitHub Actions CI/CD、AWS EC2
 
@@ -25,8 +25,8 @@
 ```
 project/
 ├── dependent_code/
-│   ├── pipeline.py           # 主流程（爬蟲 → QA）
-│   ├── config.py             # 集中管理所有常數
+│   ├── pipeline.py           # 9-step 主流程（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup）
+│   ├── config.py             # 集中管理所有常數 + sleep delays（REQUEST_DELAY=0.3, TWSE_DELAY=3）
 │   ├── schema.py             # PostgreSQL 建表 + index
 │   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
 │   ├── cache_helper.py       # Redis Cache-Aside helper
@@ -43,6 +43,14 @@ project/
 │   ├── api.py                # FastAPI REST API
 │   ├── visualization.py      # Streamlit 儀表板
 │   ├── plt_function.py       # matplotlib 圖表函式
+│   ├── pii_masking.py        # PII masking（author hash 化）
+│   ├── bert_sentiment.py     # BERT 情緒分析（fine-tune / predict / 批次推論）
+│   ├── fetch_etf_holdings.py # ETF 持股抓取（TW 0050 + US S&P 500）
+│   ├── stock_matcher.py      # 股票代號比對（run_matcher, match_done 表）
+│   ├── dw_schema.py          # Star Schema DDL（dim_source / fact_sentiment / mart tables）
+│   ├── dw_etl.py             # OLTP → DW incremental ETL
+│   ├── data_mart.py          # Data Mart（mart_daily_summary / mart_hot_stocks）
+│   ├── looker_export.py      # Looker Studio CSV 匯出
 │   ├── QA.py                 # 資料品質檢查
 │   ├── ge_validation.py      # Great Expectations 驗證
 │   ├── test_api.py           # pytest 自動測試
@@ -92,9 +100,9 @@ project/
 - [ ] PTT pipeline 跑完後確認 article count
 - [ ] Arctic Shift 跑完後重跑（new no-keyword config）
 - [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
-- [ ] PII masking（author hash 化）
+- [x] PII masking（pii_masking.py 實作完成，整合進 pipeline.py）
+- [x] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
 - [ ] JWT Authentication
-- [ ] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
 
 ---
@@ -761,7 +769,7 @@ project/
 
 | 項目 | 說明 |
 |------|------|
-| `dw_schema.py` 新建 | Star Schema DDL：`dim_date` / `dim_source` / `dim_stock` / `fact_sentiment` + Materialized View（`mv_daily_summary` / `mv_hot_stocks`）|
+| `dw_schema.py` 新建 | Star Schema DDL：`dim_source`（含 tracked_stock）/ `fact_sentiment`（含直接 DATE 欄位 fact_date，stock_symbol denormalized）+ Materialized View（`mv_daily_summary` / `mv_hot_stocks`）|
 | `dw_etl.py` 新建 | OLTP → DW incremental ETL；`source_name` denormalize 進 fact；`run_etl(do_cluster=True)` 支援 CLUSTER |
 | Snowflake 延伸 | 新增 `dim_market`（TW / US）；`dim_source` 加 FK `market_id`；支援三層 JOIN：`fact → dim_source → dim_market` |
 | `bert_sentiment.py` 新建 | BERT fine-tune + evaluate（F1 / Confusion Matrix）+ predict + 批次推論入庫（zero-shot fallback） |
@@ -810,13 +818,13 @@ project/
 |------|------|
 | `datalake.py` 新建 | S3 Data Lake 三層架構：raw(JSON) / processed(Parquet) / curated(聚合 Parquet) |
 | `mongo_helper.py` 新建 | MongoDB Docker 本機，`raw_articles` collection，`sync_from_pg()` PG→MongoDB 同步 |
-| `ner.py` 新建 | NER 命名實體識別：regex 抓代號 + 最長匹配抓公司名稱；`stock_mentions` + `ner_done` 表 |
+| `stock_matcher.py`（原 `ner.py`）新建 | 股票代號比對：regex 抓代號 + 最長匹配抓公司名稱；`stock_mentions` + `match_done` 表；`run_matcher()` 取代原 `run_ner()` |
 | `labeling_tool.py` 新建 | Streamlit 標注工具，供人工標注情緒（正/中/負）後 fine-tune BERT |
 | Data Mart 實作 | `data_mart.py` 新建 + `dw_schema.py` 加入 `mart_daily_summary` / `mart_hot_stocks` table + partial index |
 | Materialized View 移除 | `mv_daily_summary` / `mv_hot_stocks` 移除，改用 Data Mart table（更貼近業界 104 JD 用語，可跨 DB 移植） |
 | `dw_etl.py` 更新 | `refresh_views()` 移除，改呼叫 `data_mart.refresh_all()`（TRUNCATE + INSERT） |
 | `backtest.py` 新建 | 回測系統：yfinance 抓 0050/VOO 歷史股價 → 情緒 vs 隔日漲跌 → RandomForest Walk-Forward Validation → 累積報酬曲線 |
-| `fetch_etf_holdings.py` 新建 | TW 50 支（TWSE 融資限額 × 收盤價做市值代理取前 50）+ US 503 支（Wikipedia S&P 500） |
+| `fetch_etf_holdings.py` 新建 | TW 50 支（TWSE API）+ US 503 支（Wikipedia S&P 500） |
 | `stock_dict.json` 更新 | TW 50 支、US 503 支，供 NER 使用 |
 | Spark 移除 | `spark_analysis.py` 刪除、`pyspark` 從 requirements.txt 移除（待上完課再實作） |
 | `lxml` 安裝 | `pd.read_html` 所需，加入 conda env |
@@ -824,7 +832,7 @@ project/
 #### 設計決策
 
 - **Data Mart vs Materialized View**：選 Data Mart table。MV 是 PostgreSQL 特有物件（`REFRESH MATERIALIZED VIEW`）；Data Mart 是標準 table（`TRUNCATE + INSERT`），可跨 DB 移植。104 JD 都用「Data Mart」而非「MV」，因為 Data Mart 是架構概念（DW 的子集，針對部門/用途），MV 只是實作技術。
-- **Partial index**：`CREATE INDEX idx_hot ON mart_hot_stocks(push_count) WHERE push_count > 100`，只索引真正熱門的資料，索引小、查詢快。
+- **Partial index**：`idx_hot` partial index 已從 `mart_hot_stocks` 移除（資料量不足以受益）。
 - **stock_dict.json 範圍**：用戶要求 TW 只保留 0050 的 50 支持股、US 只保留 S&P 500（VOO），不做全上市股票。
 
 #### 下次繼續
@@ -936,6 +944,97 @@ project/
 - [ ] BERT sentiment_scores 表仍為空
 - [ ] 每日 Mock Interview（完整面試格式，非只專案）
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-10
+
+#### 完成項目（重構整合）
+
+| 項目 | 說明 |
+|------|------|
+| `ner.py` → `stock_matcher.py` | 重命名：`run_ner()` → `run_matcher()`，`ner_done` 表 → `match_done` 表 |
+| `pipeline.py` 9-step 整合 | 所有 standalone scripts 整合進 pipeline.py：schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup |
+| Sleep delays 統一 | 散落各檔案的 sleep 值集中到 config.py：`REQUEST_DELAY=0.3`、`TWSE_DELAY=3` |
+| DW schema 簡化 | `dim_date` 移除，fact_sentiment 改用直接 DATE 欄位 `fact_date`；`stock_symbol` denormalized 進 fact_sentiment（不再透過 dim_stock FK）；`tracked_stock` 加入 dim_source |
+| `__main__` 移除 | dw_schema.py / dw_etl.py / pii_masking.py / fetch_etf_holdings.py / stock_matcher.py / looker_export.py / backup.py 移除獨立執行入口（統一由 pipeline.py 呼叫） |
+| Dict comprehension 變數命名 | 10+ 檔案的單字母變數（k,v,d,r,s,t,p,l）改為有意義名稱 |
+| `fetch_etf_holdings.py` 簡化 | 移除融資限額 market cap proxy 邏輯 |
+| `idx_hot` partial index 移除 | `mart_hot_stocks` 的 partial index 移除（資料量不足以受益） |
+| Import style 統一 | 全專案改為 `from X import Y` pattern |
+
+#### 完成項目（Materialized View 整合）
+
+| 項目 | 說明 |
+|------|------|
+| `mv_market_summary` 建立 | `dw_schema.py` 新增 MV：`fact_sentiment JOIN dim_source JOIN dim_market`，展示 Snowflake 三表 JOIN，market 粒度（TW vs US） |
+| `dw_etl.refresh_mv()` | `dw_etl.py` 新增 Step 6：`REFRESH MATERIALIZED VIEW mv_market_summary`（需要獨立 connection，REFRESH 不能在剛 rollback 的 cursor 上跑） |
+| `data_mart.py` 文件更新 | 架構比較表加入 MV vs Mart 對照：MV 跑 market 粒度、Mart 跑 source 粒度，**互補不重複** |
+| `readme.md` 架構圖 | 加入 MV 分支：`mv_market_summary（Snowflake 三表 JOIN）` |
+| `UNIQUE INDEX` for MV | 建立 `idx_mv_market_summary_unique(fact_date, market_code)`，為日後 `REFRESH CONCURRENTLY` 預留 |
+
+#### 排錯記錄（Homebrew PostgreSQL Port 衝突）
+
+**症狀**：
+- `launchd` 排程的 ETL 在 11:25 / 12:25 / 13:25 / 14:25 連續四次失敗
+- 手動跑 BERT inference 立刻 crash（PID 84069）
+- 錯誤訊息：`database "stock_analysis_db" does not exist`
+
+**診斷過程**：
+1. 先驗證 Docker PG 內的 DB 確實存在 → `stock_analysis_db` 有 980776 articles、122000 sentiment_scores
+2. Python 連線仍然失敗 → 懷疑連到錯的 DB
+3. `lsof -iTCP:5432 -sTCP:LISTEN` 發現 **兩個** postgres 程序 + Docker container 都在搶 5432
+4. `ps` 揪出元凶：`/opt/homebrew/opt/postgresql@16/bin/postgres`（Homebrew 原生安裝的 PG 16 先 bind 5432，把 Docker 擠出去）
+5. Homebrew PG 裡面當然沒有 `stock_analysis_db`，所以一切查詢都 404
+
+**修復**：
+```bash
+/opt/homebrew/bin/brew services stop postgresql@16
+```
+驗證：Python 重連成功，看到完整 980776 articles / 122000 sentiment_scores。
+
+**教訓**：
+- 同時跑 Docker Postgres 和 brew Postgres 一定會撞 port，先開的贏
+- `launchd` 排程 ETL 無人值守時要檢查 log（`logs/etl_YYYYMMDD.log`），不然錯四次都沒人知道
+- 以後開機自動停掉 brew 的 PG service，避免下次又撞
+
+#### 概念釐清（Andrew 當天問的）
+
+**1. MV vs Data Mart 怎樣互補？**
+
+| | Materialized View | Data Mart |
+|---|---|---|
+| 儲存 | PG MV 物件 | 標準 table |
+| 更新 | `REFRESH MATERIALIZED VIEW`（PG 原子操作）| `TRUNCATE + INSERT`（手寫 ETL，跨 DB 可移植）|
+| 粒度 | market（TW / US，2 筆 / 日）| source（ptt / cnyes / reddit，3 筆 / 日）|
+| 用途 | 跨市場比較 | API / 儀表板 |
+
+**粒度不同 → 互補不重複**。MV 跑 Snowflake 三表 JOIN（fact → dim_source → dim_market）做市場層級聚合；Mart 在 source 粒度直接 GROUP BY。
+
+**2. 為什麼用 MV 就不需要 JOIN？**
+
+MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 table，不是查詢時 JOIN。`REFRESH` 的那 0.5 秒發生三表 JOIN，刷完之後的查詢都是純 SELECT。
+
+**3. 有點像 subquery？→ 四層進化論**
+
+| 層級 | 取名 | 存結果 | 查詢時 JOIN | 更新機制 |
+|------|------|--------|-------------|----------|
+| **Subquery** | ❌ | ❌ | ✅ 每次都跑 | 無（inline）|
+| **View** | ✅ | ❌ | ✅ 每次都跑 | 永遠最新 |
+| **Materialized View** | ✅ | ✅ | ❌ 讀 cache | `REFRESH`（PG 內建）|
+| **Data Mart** | ✅ | ✅ | ❌ 讀 cache | `TRUNCATE + INSERT`（跨 DB 可移植）|
+
+- Subquery → View：**有名字可以重用**
+- View → MV：**結果存起來，不用每次重算**（"Materialized" = 實體化）
+- MV → Data Mart：**離開 PG 也能用**（Data Mart 是架構概念、MV 是 PG 特有物件）
+
+#### 資料狀態快照（14:30）
+
+- `articles`：980776 筆（crawl 完整）
+- `sentiment_scores`：122000 筆（約 12.4% 完成；剩下的由背景 BERT inference 補）
+- `labels`：0 筆（未開工 → f1 / confusion matrix / BERT fine-tune 全部 blocked）
+- 背景 BERT inference 速度約 500 筆 / min，預估 28 小時補完剩下 858k 筆
+- Walk-Forward backtest 系統（`backtest.py`）已完成但同樣在等 sentiment 補齊
 
 ---
 
