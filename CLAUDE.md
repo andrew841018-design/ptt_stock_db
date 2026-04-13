@@ -55,6 +55,8 @@ project/
 │   ├── ge_validation.py      # Great Expectations 驗證
 │   ├── test_api.py           # pytest 自動測試
 │   ├── backup.py             # S3 備份
+│   ├── backtest.py           # Walk-Forward 回測（情緒 vs 隔日漲跌，RandomForest）
+│   ├── cmd.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
 │   └── requirements.txt
 ├── scripts/
 │   └── run_etl.sh
@@ -102,6 +104,10 @@ project/
 - [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
 - [x] PII masking（pii_masking.py 實作完成，整合進 pipeline.py）
 - [x] Phase 5：資料倉儲（星型 schema）、BERT 情緒模型
+- [x] backtest.py 整合進 pipeline（Step 9）
+- [x] cmd.py 建立（統一 CLI 入口，16 個指令，支援分層測試）
+- [x] 所有 `__main__` 集中到 cmd.py（schema / QA / ge / reparse / mongo / bert / backtest / reddit_batch_loader）
+- [x] 各檔案舊執行方式註解清除
 - [ ] JWT Authentication
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
 
@@ -1035,6 +1041,38 @@ MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 tabl
 - `labels`：0 筆（未開工 → f1 / confusion matrix / BERT fine-tune 全部 blocked）
 - 背景 BERT inference 速度約 500 筆 / min，預估 28 小時補完剩下 858k 筆
 - Walk-Forward backtest 系統（`backtest.py`）已完成但同樣在等 sentiment 補齊
+
+#### 完成項目（CI/CD 修復 + EC2 現況診斷）
+
+| 項目 | 說明 |
+|------|------|
+| `test_api.py` 修復 | `/sentiments/*` 三個 endpoint 改走 `data_mart.get_daily_sentiment()` 後，原本 fixtures 只 mock `pd.read_sql_query`，導致 9 個測試失敗（連不到真實 DB）；修復：兩個 fixtures 新增 `patch("api.get_daily_sentiment", return_value=MOCK_SENTIMENT_ROWS)`；`test_cache_hit` / `test_cache_miss` / `test_cache_redis_down` 三個快取測試改打 `/articles/top_push`（仍走 Cache-Aside）|
+| 本機驗證 | `pytest dependent_code/test_api.py -v` → **15 passed in 3.31s** |
+| Git commit `4864510` | feat: add mv_market_summary Materialized View (Phase 4) + sync docs（8 files, +436/-71）|
+| Git commit `b93131d` | fix(test): restore coverage after sentiment endpoints moved to data_mart（1 file, +27/-12）|
+| CI/CD 綠燈 | 兩個 commit push 後 GitHub Actions 全過（test 2m4s + deploy step 7s）|
+| **EC2 deploy 隱性失敗揭露** | `deploy.yml` deploy step 有 `continue-on-error: true` → step 實際 fail 但 job 顯示 success；真正錯誤 `fatal: Need to specify how to reconcile divergent branches`（EC2 13 commits ahead + 19 behind，`merge-base` 為空）|
+| EC2 infra 盤點 | 911 MiB RAM（t2.micro，0 swap）、2.2 GB disk free；**沒有 Docker / PostgreSQL / Redis / `.env`**；git HEAD 卡在 `5daa068 fix backup.py 路徑問題`（SQLite 時代）；uvicorn / streamlit 早就沒在跑 |
+| AWS Free Tier 促銷 credit 查詢 | $100 promotional credit，已用 $9.05，剩 $90.95，到期 **2027/03/12**（~11 個月後）|
+| 遷移路線決策 | **Path B — 升級 t3.small**（~$17/月 × 3 個月 demo = $51，buffer $40；credit 過期前剛好用完不浪費）|
+
+#### 學到的概念
+
+- **`unittest.mock.patch` 規則（強化版）**：patch **import site**, not **definition site**。`api.py` 裡寫 `from data_mart import get_daily_sentiment` 後，`api` 模組的 namespace 就有一個叫 `get_daily_sentiment` 的名字；測試必須 patch `api.get_daily_sentiment`（使用者實際查的位置），不是 `data_mart.get_daily_sentiment`（原始定義位置）。**重構搬函式時，測試 mock 也要同步跟著搬**，否則 pytest 會悄悄連真實 DB（CI 無 DB 會 fail，本機有 DB 會 false pass，最難抓）
+- **`continue-on-error: true` 是 CI/CD 殺手**：這個 flag 讓 step 失敗不影響 job 狀態 → deploy step 永遠顯示綠燈，即使 SSH script 整個爆；production deploy step 絕對不能開，只有「預期可能失敗且不影響後續」的實驗性 step 才用
+- **Git 歷史無共同祖先（`merge-base` empty）**：兩條 branch 完全獨立發展時 `git merge-base A B` 回傳空字串，強 merge 會製造地獄級衝突；正確解法是選定一條為主幹 → 另一條 `git reset --hard origin/main` 放棄歷史
+- **AWS Free Tier 雙層結構**：(1) **12-month free tier** = 新戶前 12 個月 t2.micro 750 hours/月免費（時限）(2) **Promotional credit** = 開戶送的 $100 credit，有到期日（金額限制）。兩者可疊加但各有限制；credit 用完或過期後，第一層還在的話 t2.micro 仍免費
+- **Promotional credit 到期邏輯**：credit 有到期日 → 不用就歸零 → 「省著用」實質等於丟錢。面試期間應該大方用掉（升級 instance、測試新服務），過期前剛好耗盡最划算
+- **EC2 instance type 升級**：Stop → Change Instance Type → Start；Stop 不會丟資料（EBS 保留）；Public IP 會變（除非綁 Elastic IP）→ 升完要同步更新 SSH config / GitHub secret `EC2_IP` / DNS
+- **IAM user 分層授權原則（最小權限）**：backup 用途的 IAM user（`ptt-s3-user`）只應該有 S3 權限，不要預先給 AdministratorAccess；跨服務操作時需建不同用途的 user 或臨時加 policy，用完收回；本次 boto3 `DescribeRegions` 被擋就是最小權限原則正確運作的證據
+
+#### 進行中 / 待解
+
+- [ ] **卡點**：EC2 升級被 IAM 擋住 — `ptt-s3-user` 只有 S3 權限，需加 `AdministratorAccess`（或另建 admin IAM user）才能透過 boto3 `DescribeInstances` / `StopInstances` / `ModifyInstanceAttribute`
+- [ ] Path B 後續：裝 Docker + PG container + Redis + `.env` + `pg_dump`/`pg_restore` 遷移
+- [ ] `deploy.yml` 修復：`git pull` → `git fetch && git reset --hard origin/main`；移除 `continue-on-error: true`；加 health check
+- [ ] GitHub secret `EC2_IP` 更新為升級後的新 Public IP
+- [ ] 驗證 `http://<新 IP>:8000`（uvicorn）和 `:8501`（streamlit）都能通
 
 ---
 

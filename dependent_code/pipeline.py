@@ -18,6 +18,8 @@ from stock_matcher import run_matcher
 from dw_etl import run_etl
 from looker_export import main as run_looker_export
 from backup import backup_database
+from backtest import run_backtest
+from mongo_helper import ensure_indexes
 
 # stream=sys.stdout：logging 寫 stdout，tqdm 保持 stderr，redirect 時乾淨分離
 logging.basicConfig(
@@ -101,9 +103,10 @@ def transform() -> None:
         logging.warning(f"[Transform] GE 驗證失敗：{e}")
 
 
-if __name__ == "__main__":
-    # Step 0：確保 OLTP 表存在（IF NOT EXISTS，幂等）
+def run_pipeline() -> None:
+    # Step 0：確保 OLTP 表（PostgreSQL）與 MongoDB index 存在（IF NOT EXISTS，幂等）
     create_schema()
+    ensure_indexes()
 
     # Step 1：爬蟲寫入 OLTP
     extract()
@@ -145,4 +148,15 @@ if __name__ == "__main__":
     except Exception as e:
         logging.warning(f"[Backup] 失敗（不中止 pipeline）：{e}")
 
+    # Step 9：回測（情緒 vs 隔日漲跌，Walk-Forward Validation）
+    try:
+        run_backtest("tw")
+        run_backtest("us")
+    except Exception as e:
+        logging.warning(f"[Backtest] 失敗（不中止 pipeline）：{e}")
+
     logging.info("[Pipeline] 全部完成")
+
+
+if __name__ == "__main__":
+    run_pipeline()

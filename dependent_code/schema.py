@@ -1,6 +1,5 @@
 """
 PostgreSQL Schema 建立腳本
-執行方式：python scripts/schema.py
 """
 
 import os
@@ -166,6 +165,3 @@ def create_schema() -> None:
         if conn:
             conn.close()
 
-
-if __name__ == "__main__":
-    create_schema()

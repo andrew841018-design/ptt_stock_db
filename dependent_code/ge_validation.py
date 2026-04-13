@@ -74,6 +74,3 @@ def ge_validate():
     else:
         logging.warning("GE WARN：us_stock_prices 無資料")
 
-
-if __name__ == "__main__":
-    ge_validate()
