@@ -1,3 +1,4 @@
+import datetime
 import pytest
 import pandas as pd
 import redis
@@ -13,6 +14,7 @@ client = TestClient(app)
 app.dependency_overrides[verify_token] = lambda: {"sub": "testuser", "role": "admin"}
 
 # ===== Mock 資料 =====
+# MOCK_DATA：articles 表格資料（供 /articles/top_push、/articles/search 用）
 MOCK_DATA = pd.DataFrame({
     "Article_id":             [1, 2, 3],
     "Title":                  ["台積電大漲", "聯發科分析", "台積電展望"],
@@ -25,6 +27,14 @@ MOCK_DATA = pd.DataFrame({
 
 MOCK_EMPTY = pd.DataFrame({col: [] for col in MOCK_DATA.columns})
 
+# MOCK_SENTIMENT_ROWS：data_mart.get_daily_sentiment() 的回傳格式（list[dict]）
+# 供 /sentiments/today、/sentiments/change、/sentiments/recent 三個端點用
+# 至少 2 筆才能過 /sentiments/change（需要比較今日 vs 昨日）
+MOCK_SENTIMENT_ROWS = [
+    {"summary_date": datetime.date(2024, 1, 2), "total_articles": 100, "avg_sentiment": 0.5},
+    {"summary_date": datetime.date(2024, 1, 1), "total_articles": 80,  "avg_sentiment": 0.3},
+]
+
 STANDARD_CASES = [
     ("mock_db_with_data", [200, 404]),
     ("mock_db_empty", [404]),
@@ -34,16 +44,18 @@ STANDARD_CASES = [
 @pytest.fixture
 def mock_db_with_data():
     """
-    四個 patch 平行生效，同時換掉、同時還原，無階層關係：
-    - get_cache       → None（模擬 MISS，確保走到 DB）
-    - set_cache       → no-op（不實際寫 Redis）
-    - read_sql_query  → MOCK_DATA（不查真實 DB）
-    - get_pg_readonly → no-op（不建立真實連線）
+    五個 patch 平行生效，同時換掉、同時還原，無階層關係：
+    - get_cache           → None（模擬 MISS，確保走到 DB）
+    - set_cache           → no-op（不實際寫 Redis）
+    - read_sql_query      → MOCK_DATA（load_articles_df 用）
+    - get_pg_readonly     → no-op（不建立真實連線）
+    - get_daily_sentiment → MOCK_SENTIMENT_ROWS（/sentiments/* 端點用，走 data_mart 不走 cache）
     """
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg_readonly"):
+         patch("api.get_pg_readonly"), \
+         patch("api.get_daily_sentiment", return_value=list(MOCK_SENTIMENT_ROWS)):
         yield
 
 @pytest.fixture
@@ -51,7 +63,8 @@ def mock_db_empty():
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_EMPTY.copy()), \
-         patch("api.get_pg_readonly"):
+         patch("api.get_pg_readonly"), \
+         patch("api.get_daily_sentiment", return_value=[]):
         yield
 
 # ===== Tests =====
@@ -146,6 +159,8 @@ def test_set_and_get_cache():
 
 
 # ===== Cache-Aside Tests =====
+# 走 Cache-Aside 的端點：/articles/top_push、/articles/search（透過 load_articles_df）
+# /sentiments/* 系列改走 data_mart.get_daily_sentiment，不經過 cache
 def test_cache_hit():
     """
     測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg_readonly 不被呼叫
@@ -155,14 +170,14 @@ def test_cache_hit():
     - api.get_pg_readonly → 空物件（保險用，確保萬一走錯時不會真的連 DB）
 
     flow:
-    client.get("/sentiments/today")
-    => get_today_sentiment()
+    client.get("/articles/top_push")
+    => get_top_push_articles()
     => load_articles_df()
     => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg_readonly 不執行
     """
     with patch("api.get_cache", return_value=MOCK_DATA.copy()) as mock_get, \
          patch("api.get_pg_readonly") as mock_db:
-        response = client.get("/sentiments/today")
+        response = client.get("/articles/top_push")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查
         mock_db.assert_not_called()     # DB 完全沒被碰
@@ -174,7 +189,7 @@ def test_cache_miss():
          patch("api.set_cache") as mock_set, \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
          patch("api.get_pg_readonly"):
-        response = client.get("/sentiments/today")
+        response = client.get("/articles/top_push")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查（但 MISS）
         mock_set.assert_called_once()   # 查完 DB 後有存進 Redis
@@ -186,5 +201,5 @@ def test_cache_redis_down():
          patch("cache_helper._redis.setex", side_effect=redis.RedisError("Redis 掛了")), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
          patch("api.get_pg_readonly"):
-        response = client.get("/sentiments/today")
+        response = client.get("/articles/top_push")
         assert response.status_code == 200  # API 正常回傳，沒有爆
