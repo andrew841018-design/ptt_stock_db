@@ -27,6 +27,7 @@ class PttScraper(BaseScraper):
 
     PTT_BASE_URL = "https://www.ptt.cc"
     HEADERS = {"cookie": "over18=1"}  # PTT 需要 over18 cookie 才能瀏覽
+    EARLY_STOP_PAGES = 3  # 連續 N 頁全為已知文章就停止
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -34,16 +35,29 @@ class PttScraper(BaseScraper):
     def fetch_articles(self) -> list:
         """
         從 PTT Stock 板爬取 num_pages 頁，回傳標準格式文章 list。
-        每篇文章格式：
-          title, content, url, author, published_at, push_count, comments
+        增量爬取：先載入 DB 已有的 URL，遇到已知文章跳過 HTTP 請求，
+        連續 EARLY_STOP_PAGES 頁全為已知文章時提早結束。
         """
+        known_urls = self._load_urls()
+        logging.info(f"PTT 載入已知 URL：{len(known_urls)} 筆")
+
         articles = []
         url = f"{_SOURCE['url']}/index.html"
+        consecutive_empty_pages = 0
 
         for page_num in tqdm(range(_SOURCE["num_pages"]), desc="PTT 爬蟲頁數", file=sys.stderr):
             try:
-                page_articles, next_url = self._scrape_list_page(url)
+                page_articles, next_url = self._scrape_list_page(url, known_urls)
                 articles.extend(page_articles)
+
+                if not page_articles:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= self.EARLY_STOP_PAGES:
+                        logging.info(f"PTT 連續 {consecutive_empty_pages} 頁無新文章，停止")
+                        break
+                else:
+                    consecutive_empty_pages = 0
+
                 if not next_url:
                     logging.info("已到最舊頁，停止爬取")
                     break
@@ -53,8 +67,8 @@ class PttScraper(BaseScraper):
                 continue
 
         return articles
-        
-    def _scrape_list_page(self, url: str) -> tuple:
+
+    def _scrape_list_page(self, url: str, known_urls: set) -> tuple:
         """
         爬一頁列表，回傳 (articles_list, prev_page_url)。
         articles_list: 該頁成功爬取的文章（標準格式）
@@ -68,7 +82,7 @@ class PttScraper(BaseScraper):
 
         articles = []
         for item in soup.find_all("div", class_="r-ent"):
-            article = self._parse_article_html(item)
+            article = self._parse_article_html(item, known_urls)
             if article:
                 articles.append(article)
 
@@ -83,10 +97,10 @@ class PttScraper(BaseScraper):
                 return prev_tag.get("href")
         return None
 
-    def _parse_article_html(self, item) -> Optional[dict]:
+    def _parse_article_html(self, item, known_urls: set) -> Optional[dict]:
         """
         解析列表頁的單筆 r-ent，回傳標準格式 dict。
-        無效文章（被刪除、符合過濾關鍵字、內文爬取失敗）回傳 None。
+        無效文章（被刪除、符合過濾關鍵字、已爬過、內文爬取失敗）回傳 None。
         """
         title_tag  = item.find("div", class_="title")
         author_tag = item.find("div", class_="author")
@@ -102,6 +116,11 @@ class PttScraper(BaseScraper):
             return None
 
         article_url = self.PTT_BASE_URL + a_tag.get("href")
+
+        # 已爬過的文章直接跳過，不再發 HTTP 請求
+        if article_url in known_urls:
+            return None
+
         content_data = self._scrape_article_content(article_url)
         if not content_data:
             return None

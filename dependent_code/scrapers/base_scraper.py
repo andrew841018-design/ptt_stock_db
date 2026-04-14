@@ -125,17 +125,21 @@ class BaseScraper(ABC):
                     if article_id and article.get('comments'):  # for ptt only
                         self._insert_comments(cursor, article_id, article['comments'])
 
-    def _get_or_create_source(self, cursor, name: str, url: str) -> int:
+    def _find_source(self, cursor, url: str) -> Optional[int]:
         cursor.execute(f"SELECT source_id FROM {SOURCES_TABLE} WHERE url = %s", (url,))
         row = cursor.fetchone()
-        if row:
-            return row[0]
+        return row[0] if row else None
+
+    def _get_or_create_source(self, cursor, name: str, url: str) -> int:
+        source_id = self._find_source(cursor, url)
+        if source_id is not None:
+            return source_id
         cursor.execute(
             f"INSERT INTO {SOURCES_TABLE} (source_name, url) VALUES (%s, %s)"
-            f" ON CONFLICT (url) DO NOTHING RETURNING source_id",
+            f" ON CONFLICT (url) DO NOTHING",
             (name, url)
         )
-        return cursor.fetchone()[0]
+        return self._find_source(cursor, url)
 
     def _is_duplicate(self, cursor, url: str) -> bool:
         cursor.execute(f"SELECT article_id FROM {ARTICLES_TABLE} WHERE url = %s", (url,))

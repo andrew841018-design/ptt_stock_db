@@ -1076,6 +1076,97 @@ MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 tabl
 
 ---
 
+### 2026-04-11
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `cmd.py` import 修正 | `from config import REDDIT_BATCH_HISTORY_START` → `from scrapers.reddit_batch_loader import RedditBatchLoader, REDDIT_BATCH_HISTORY_START`（常數定義在 reddit_batch_loader.py 不在 config.py，原寫法 runtime crash） |
+| `bert_sentiment.py` DB 存取統一 | `run_batch_inference()` 寫入 sentiment_scores 時，從 raw `psycopg2.connect(**PG_CONFIG)` 改為 `get_pg()` context manager，移除不再需要的 `import psycopg2` 和 `PG_CONFIG` import |
+| `stock_matcher.py` DB 存取統一 | `create_mentions_table()` 和 `run_matcher()` 寫入區塊，從 raw `psycopg2.connect(**PG_CONFIG)` 改為 `get_pg()`（兩處），移除 `PG_CONFIG` import |
+| `data_mart.py` 過時文件清理 | `refresh_mart_hot_stocks()` docstring 移除「Partial index idx_hot」描述（index 已在先前 session 刪除）|
+| `dw_etl.py` 重複 commit 修正 | `run_etl()` 中 `do_cluster=True` 分支內有 `conn.commit()` + 分支外又一個 `conn.commit()`，移除分支內的重複 commit |
+| `requirements.txt` 補齊 | 新增 `lxml`（`pd.read_html` 需要）和 `numpy`（`bert_sentiment.py` 直接 import） |
+| `readme.md` 更新 | 8-step → 9-step（pipeline.py 含 looker_export）；新增 cmd.py / looker_export.py 至專案結構；新增 `/auth/login` 和 `/ai_model_prediction/{market}` 至 API Endpoints |
+
+#### 設計決策
+
+- **保留 `psycopg2.connect(**PG_CONFIG)` 的地方**：`schema.py`、`dw_schema.py`、`dw_etl.py` 的 DDL 操作需要 admin 角色（CREATE TABLE / REFRESH MV / CLUSTER），不走 `get_pg()`（走 etl_user 角色）是刻意的
+- **`get_pg()` 統一原則**：所有 DML 操作（INSERT / UPDATE / SELECT）應統一使用 `get_pg()` context manager，確保 commit/rollback/close 自動處理
+
+#### 下次繼續
+
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
+- [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論
+- [ ] JWT Authentication
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-12
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `base_scraper.py` race condition 修復 | `_get_or_create_source` 的 `ON CONFLICT DO NOTHING` 觸發時 `RETURNING` 不回傳行，`fetchone()` 回 None → `None[0]` TypeError；改為 fallback SELECT |
+| `ai_model_prediction.py` `__file__` 修復 | `_spawn_bert_inference_background` 在 subprocess `-c` 模式中使用 `os.path.dirname(__file__)`，但 `-c` 模式下 `__file__` 未定義；改為外層取 `cwd` 再嵌入 |
+| `pipeline.py` argparse 衝突修復 | `from looker_export import main as run_looker_export` → `main()` 內含 `argparse` 會讀 `sys.argv`，從 pipeline 呼叫時報 unrecognized arguments；改為 `from looker_export import save_csv` |
+| `cmd.py` argparse 衝突修復 | `_cmd_looker` 同樣呼叫 `looker_export.main()`，改為直接呼叫 `save_csv()` |
+| `fetch_etf_holdings.py` 死碼移除 | `existing` 變數讀取後從未使用（`merged` 直接覆蓋 tw/us），移除死碼 |
+
+#### 下次繼續
+
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
+- [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論
+- [ ] JWT Authentication
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-13
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `data_mart.py` 過時 docstring 清理 | `get_hot_stocks_from_mart()` docstring 引用已移除的 `idx_hot` partial index，簡化為一行 |
+| `data_mart.py` 冗餘 `conn.commit()` 移除 | `refresh_mart_daily_summary()` 和 `refresh_mart_hot_stocks()` 內的 `conn.commit()` 與 `get_pg()` auto-commit 重複，移除（同 2026-04-11 修 `dw_etl.py` 同類問題）|
+
+#### 備註
+
+- 10 次迭代 code review 僅發現上述 2 個問題，程式碼品質穩定
+- `get_pg()` auto-commit 重複問題已在 `dw_etl.py`（04-11）和 `data_mart.py`（04-13）全部清除
+
+### 2026-04-14
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `pii_masking.py` return type hint 修正 | `hash_author()` 回傳 `Optional[str]`（author 為空時 return None），但原本標註 `-> str`，改為 `-> Optional[str]` 並補上 `from typing import Optional` |
+
+#### 備註
+
+- 10 次迭代 code review 僅發現上述 1 個問題（type hint 不一致），程式碼品質持續穩定
+- 連續三次 scheduled update（04-11、04-13、04-14）發現的問題數遞減（3 → 2 → 1），codebase 趨於成熟
+
+#### 下次繼續
+
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
+- [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論
+- [ ] JWT Authentication
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
 ## 使用說明
 
 每次開新對話時，請先說：「先讀 CLAUDE.md」，Claude 就能快速接續上次進度。

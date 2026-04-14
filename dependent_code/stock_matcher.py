@@ -20,7 +20,7 @@ import psycopg2
 import psycopg2.extras
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import PG_CONFIG, ARTICLES_TABLE
+from config import ARTICLES_TABLE
 from pg_helper import get_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -110,14 +110,10 @@ CREATE TABLE IF NOT EXISTS match_done (
 
 
 def create_mentions_table() -> None:
-    conn = psycopg2.connect(**PG_CONFIG)
-    try:
+    with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_STOCK_MENTIONS)
-        conn.commit()
-        logging.info("[Match] stock_mentions table ready")
-    finally:
-        conn.close()
+    logging.info("[Match] stock_mentions table ready")
 
 
 # ─── 批次抽取入庫 ──────────────────────────────────────────────────────────────
@@ -172,8 +168,7 @@ def run_matcher(batch_size: int = 1000) -> None:
                 mention_records.append((article_id, m["code"], m["name"], m["market"]))
             done_id.append((article_id,))
 
-        conn = psycopg2.connect(**PG_CONFIG)
-        try:
+        with get_pg() as conn:
             with conn.cursor() as cur:
                 if mention_records:
                     psycopg2.extras.execute_values(
@@ -185,15 +180,11 @@ def run_matcher(batch_size: int = 1000) -> None:
                         """,
                         mention_records,
                     )
-                # 標記已處理（無論有無提及）
                 psycopg2.extras.execute_values(
                     cur,
                     "INSERT INTO match_done (article_id) VALUES %s ON CONFLICT DO NOTHING",
                     done_id,
                 )
-            conn.commit()
-        finally:
-            conn.close()
 
         processed += len(rows)
         logging.info("[Match] 進度：%d / %d（本批提及 %d 筆）", processed, total, len(mention_records))
@@ -201,19 +192,3 @@ def run_matcher(batch_size: int = 1000) -> None:
     logging.info("[Match] 完成")
 
 
-# ─── 熱門股票統計（給儀表板用）────────────────────────────────────────────────
-
-def get_hot_stocks(market: str = "TW", top_n: int = 20) -> list[dict]:
-    """回傳提及次數最多的前 N 支股票"""
-    with get_pg() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT stock_code, stock_name, COUNT(*) AS mention_count
-                FROM stock_mentions
-                WHERE market = %s
-                GROUP BY stock_code, stock_name
-                ORDER BY mention_count DESC
-                LIMIT %s
-            """, (market, top_n))
-            rows = cur.fetchall()
-    return [{"code": code, "name": name, "count": count} for code, name, count in rows]

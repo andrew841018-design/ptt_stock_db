@@ -100,8 +100,8 @@ def _cmd_dw_etl(_args):
 
 
 def _cmd_looker(_args):
-    from looker_export import main as run_looker_export
-    run_looker_export()
+    from looker_export import save_csv
+    save_csv()
 
 
 def _cmd_backup(_args):
@@ -178,8 +178,7 @@ def _cmd_ai_predict(args):
 # ─── Reddit 批次 ───────────────────────────────────────────────────────────────
 
 def _cmd_reddit_batch(args):
-    from scrapers.reddit_batch_loader import RedditBatchLoader
-    from config import REDDIT_BATCH_HISTORY_START
+    from scrapers.reddit_batch_loader import RedditBatchLoader, REDDIT_BATCH_HISTORY_START
 
     if args.after and args.before:
         after_dt  = datetime.strptime(args.after,  "%Y-%m-%d")

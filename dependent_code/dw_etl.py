@@ -178,8 +178,7 @@ def run_etl(do_cluster: bool = False) -> None:
             populate_fact(cur)         # Step 4：事實表（聚合 OLTP 資料）
         if do_cluster:
             with conn.cursor() as cur:
-                cluster_fact(cur)      # 可選：物理排序加速範圍查詢
-            conn.commit()
+                cluster_fact(cur)
         conn.commit()
         refresh_all()                  # Step 5：刷新 Data Mart（mart_daily_summary + mart_hot_stocks）
         # Step 6：刷新 Materialized View（需要自己的 connection，REFRESH 不能在剛 rollback 的 cursor 上跑）

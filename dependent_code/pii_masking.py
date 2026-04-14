@@ -5,13 +5,14 @@ PII Masking — author 欄位 hash 化
 
 import hashlib
 import logging
+from typing import Optional
 from config import PII_HASH_SALT, ARTICLES_TABLE, COMMENTS_TABLE
 from pg_helper import get_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-def hash_author(author: str) -> str:
+def hash_author(author: str) -> Optional[str]:
     """將 author 加鹽後做 SHA-256 hash，取前 16 碼"""
     if not author:
         return None

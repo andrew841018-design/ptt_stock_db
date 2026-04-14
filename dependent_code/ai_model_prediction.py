@@ -298,11 +298,12 @@ def _spawn_bert_inference_background() -> None:
     以 subprocess 背景執行 BERT 批次推論，呼叫端立刻返回，
     不阻塞 Streamlit / pipeline。下次跑 ai_model_prediction 時資料就有了。
     """
+    cwd = os.path.dirname(__file__)
     subprocess.Popen(
         [sys.executable, "-c",
-         "import sys, os; sys.path.insert(0, os.path.dirname(__file__)); "
+         f"import sys, os; sys.path.insert(0, {cwd!r}); "
          "from bert_sentiment import run_batch_inference; run_batch_inference()"],
-        cwd=os.path.dirname(__file__),
+        cwd=cwd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # 脫離父行程 session，父退出子也不會被殺

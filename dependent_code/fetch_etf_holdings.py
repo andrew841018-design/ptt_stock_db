@@ -93,11 +93,6 @@ def update_stock_dict(tw: dict[str, str], us: dict[str, str]) -> None:
     載入現有 stock_dict.json，用新抓的資料覆蓋 tw / us，
     並保留手動維護的其他 key（如 ETF 本身 0050 / VOO 等）。
     """
-    existing: dict = {}
-    if os.path.exists(DICT_PATH):
-        with open(DICT_PATH, "r", encoding="utf-8") as f:
-            existing = json.load(f)
-
     merged = {
         "tw": tw,   # 完全替換（0050 的 50 支）
         "us": us,   # 完全替換（S&P 500 的約 503 支）

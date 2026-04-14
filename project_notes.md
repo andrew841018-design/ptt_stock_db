@@ -436,6 +436,16 @@ def get_db():
 
 解決 connection leak：`with` 進去拿 handle，出來自動關閉。
 
+### DB 連線雙軌制
+
+| 用途 | 連線方式 | 角色 | 適用檔案 |
+|------|---------|------|---------|
+| DML（INSERT/UPDATE/SELECT）| `get_pg()` context manager | etl_user | bert_sentiment、stock_matcher、data_mart 等 |
+| DDL（CREATE TABLE/REFRESH MV/CLUSTER）| `psycopg2.connect(**PG_CONFIG)` | admin | schema.py、dw_schema.py、dw_etl.py |
+
+- DML 統一走 `get_pg()`：自動 commit/rollback/close
+- DDL 需要 admin 權限：etl_user 的 GRANT 不含 CREATE，必須用 PG_CONFIG（admin 角色）
+
 ### Import 風格
 
 - 全專案統一 `from X import Y`，不用 `import X` 再 `X.Y`
@@ -447,6 +457,17 @@ def get_db():
 - `str | None`（PEP 604）→ Python 3.10+ 才支持
 - Python 3.9 在 class 定義時直接 `TypeError`，整個模組 import 失敗
 - 安全寫法：`Optional[str]`（3.5+）
+
+### subprocess `-c` 模式陷阱
+
+- `python -c "..."` 執行時 `__file__` 未定義（不是從檔案執行）
+- 需要在外層先取 `cwd = os.path.dirname(__file__)`，再用 f-string 嵌入 `-c` 字串
+
+### argparse 跨模組呼叫陷阱
+
+- 模組的 `main()` 如果用 `argparse.parse_args()`，會讀 `sys.argv`
+- 被另一個 CLI 工具（pipeline / cmd）import 呼叫時，`sys.argv` 帶的是外層的參數 → `unrecognized arguments` 報錯
+- **解法**：expose 不帶 argparse 的函式（如 `save_csv()`），`main()` 只在 `__main__` 用
 
 ### pandas 速查
 
@@ -702,4 +723,4 @@ def hash_author(author: str) -> str:
 
 ---
 
-*最後更新：2026-04-10*
+*最後更新：2026-04-13*
