@@ -16,7 +16,7 @@
 
 **PTT 股票板情緒分析系統**
 
-資料流：`schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup`
+資料流：`schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup`
 
 技術棧：Python、SQLite / PostgreSQL、FastAPI、Streamlit、Redis、pytest、GitHub Actions CI/CD、AWS EC2
 
@@ -25,7 +25,7 @@
 ```
 project/
 ├── dependent_code/
-│   ├── pipeline.py           # 9-step 主流程（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup）
+│   ├── pipeline.py           # 8-step 主流程（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup）
 │   ├── config.py             # 集中管理所有常數 + sleep delays（REQUEST_DELAY=0.3, TWSE_DELAY=3）
 │   ├── schema.py             # PostgreSQL 建表 + index
 │   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
@@ -50,13 +50,12 @@ project/
 │   ├── dw_schema.py          # Star Schema DDL（dim_source / fact_sentiment / mart tables）
 │   ├── dw_etl.py             # OLTP → DW incremental ETL
 │   ├── data_mart.py          # Data Mart（mart_daily_summary / mart_hot_stocks）
-│   ├── looker_export.py      # Looker Studio CSV 匯出
 │   ├── QA.py                 # 資料品質檢查
 │   ├── ge_validation.py      # Great Expectations 驗證
 │   ├── test_api.py           # pytest 自動測試
 │   ├── backup.py             # S3 備份
 │   ├── ai_model_prediction.py # Walk-Forward AI 模型預測（情緒 vs 隔日漲跌，RandomForest）
-│   ├── cmd.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
+│   ├── cli.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
 │   └── requirements.txt
 ├── scripts/
 │   └── run_etl.sh

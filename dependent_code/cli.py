@@ -3,33 +3,32 @@
 
 用法：
   # Pipeline 各步驟（可單獨執行，也可跑完整流程）
-  python cmd.py schema
-  python cmd.py extract
-  python cmd.py transform
-  python cmd.py pii
-  python cmd.py bert train|evaluate|infer
-  python cmd.py match
-  python cmd.py dw-etl
-  python cmd.py looker
-  python cmd.py backup
-  python cmd.py pipeline                           # Step 0~9 全跑
+  python cli.py schema
+  python cli.py extract
+  python cli.py transform
+  python cli.py pii
+  python cli.py bert train|evaluate|infer
+  python cli.py match
+  python cli.py dw-etl
+  python cli.py backup
+  python cli.py pipeline                           # Step 0~9 全跑
 
   # QA / 診斷
-  python cmd.py qa
-  python cmd.py ge
-  python cmd.py reparse
-  python cmd.py mongo
+  python cli.py qa
+  python cli.py ge
+  python cli.py reparse
+  python cli.py mongo
 
   # AI 模型預測（分層測試）
-  python cmd.py ai-predict fetch-sentiment tw      # 只測情緒 DB 查詢
-  python cmd.py ai-predict fetch-sentiment us
-  python cmd.py ai-predict fetch-price tw          # 只測股價 DB 讀取
-  python cmd.py ai-predict fetch-price us
-  python cmd.py ai-predict run tw|us|all           # 完整預測
+  python cli.py ai-predict fetch-sentiment tw      # 只測情緒 DB 查詢
+  python cli.py ai-predict fetch-sentiment us
+  python cli.py ai-predict fetch-price tw          # 只測股價 DB 讀取
+  python cli.py ai-predict fetch-price us
+  python cli.py ai-predict run tw|us|all           # 完整預測
 
   # Reddit 歷史批次載入
-  python cmd.py reddit-batch                       # 全歷史
-  python cmd.py reddit-batch 2024-01-01 2024-03-01 # 指定區間
+  python cli.py reddit-batch                       # 全歷史
+  python cli.py reddit-batch 2024-01-01 2024-03-01 # 指定區間
 """
 
 import argparse
@@ -97,11 +96,6 @@ def _cmd_match(_args):
 def _cmd_dw_etl(_args):
     from dw_etl import run_etl
     run_etl()
-
-
-def _cmd_looker(_args):
-    from looker_export import save_csv
-    save_csv()
 
 
 def _cmd_backup(_args):
@@ -209,7 +203,6 @@ def main():
     sub.add_parser("pii",       help="PII 遮蔽（author hash 化）")
     sub.add_parser("match",     help="更新 ETF 持股 + 股票代號比對")
     sub.add_parser("dw-etl",    help="OLTP → DW ETL + 刷新 Data Mart")
-    sub.add_parser("looker",    help="匯出 CSV 給 Looker Studio")
     sub.add_parser("backup",    help="S3 備份")
 
     p_bert = sub.add_parser("bert", help="BERT 操作")
@@ -252,7 +245,6 @@ def main():
         "bert":      _cmd_bert,
         "match":     _cmd_match,
         "dw-etl":    _cmd_dw_etl,
-        "looker":    _cmd_looker,
         "backup":    _cmd_backup,
         "qa":        _cmd_qa,
         "ge":        _cmd_ge,

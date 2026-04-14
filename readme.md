@@ -70,8 +70,8 @@ PostgreSQL（OLTP）                    MongoDB（schema-less）
 ```
 project/
 ├── dependent_code/
-│   ├── pipeline.py           # 主流程（9-step：schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup）
-│   ├── cmd.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
+│   ├── pipeline.py           # 主流程（8-step：schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup）
+│   ├── cli.py                # 統一 CLI 入口（本機測試 & 手動觸發各功能）
 │   ├── config.py             # 集中管理所有常數
 │   ├── schema.py             # PostgreSQL 建表 + index
 │   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
@@ -104,7 +104,6 @@ project/
 │   ├── auth.py               # JWT 認證（verify_token）
 │   ├── mongo_helper.py       # MongoDB raw_responses helper
 │   ├── ai_model_prediction.py # AI 模型預測系統（Walk-Forward + RandomForest）
-│   ├── looker_export.py      # Looker Studio CSV 匯出
 │   ├── fetch_etf_holdings.py # ETF 持股抓取（TW 0050 + US S&P 500）→ stock_dict.json
 │   ├── stock_dict.json       # 股票代號↔公司名稱對照（stock_matcher 用）
 │   └── requirements.txt      # 套件清單
@@ -339,7 +338,7 @@ schema → extract（PTT + 鉅亨網 + Reddit + TWSE + VOO）→ transform（QA 
 - [x] Phase 5：BERT 情緒分析（fine-tune + zero-shot 批次推論）
 - [x] Phase 5：Stock Matcher 股票比對（regex + 公司名稱最長匹配，原 ner.py → stock_matcher.py）
 - [x] Phase 5：AI 模型預測系統（Walk-Forward + RandomForest）
-- [x] pipeline.py 9-step 整合（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → looker_export → backup）
+- [x] pipeline.py 8-step 整合（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup）
 - [x] dim_date 移除（DW schema 簡化，fact_sentiment 直接用 fact_date）
 - [x] stock_symbol denormalized 進 fact_sentiment，tracked_stock 加入 dim_source
 - [x] Sleep delays 統一收進 config.py
@@ -347,7 +346,6 @@ schema → extract（PTT + 鉅亨網 + Reddit + TWSE + VOO）→ transform（QA 
 - [x] idx_hot partial index 移除
 - [x] Bug fix：base_scraper `_get_or_create_source` race condition（ON CONFLICT RETURNING 為空時 fallback SELECT）
 - [x] Bug fix：ai_model_prediction `_spawn_bert_inference_background` subprocess `-c` 模式 `__file__` 未定義
-- [x] Bug fix：pipeline.py / cmd.py looker_export argparse 衝突（改呼叫 `save_csv()`）
 - [x] fetch_etf_holdings.py 死碼移除（未使用的 `existing` 變數）
 - [ ] Phase 5：Spark/PySpark 批次處理（待上完課）
 - [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論

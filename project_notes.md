@@ -163,8 +163,7 @@ pipeline.py 9-step 編排：
   4. run_batch_inference() → BERT 情緒推論
   5. run_fetch_etf() + run_matcher() → ETF 持股更新 + 股票比對
   6. run_etl()          → DW ETL + Data Mart 刷新
-  7. run_looker_export() → 匯出 CSV
-  8. backup_database()  → S3 備份
+  7. backup_database()  → S3 備份
 ```
 
 - 所有獨立腳本已整合進 `pipeline.py`，透過 `from X import Y` 統一呼叫
