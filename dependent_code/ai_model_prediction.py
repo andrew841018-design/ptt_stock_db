@@ -37,15 +37,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # ─── 設定 ──────────────────────────────────────────────────────────────────────
 
+from config import sources_by_market
+
 MARKET_CONFIG = {
     "tw": {
         "prices_table": STOCK_PRICES_TABLE,
-        "sources":      ["ptt", "cnyes"],
+        "sources":      sources_by_market("TW"),
         "display_name": "0050 元大台灣50",
     },
     "us": {
         "prices_table": US_STOCK_PRICES_TABLE,
-        "sources":      ["reddit"],
+        "sources":      sources_by_market("US"),
         "display_name": "VOO Vanguard S&P 500 ETF",
     },
 }

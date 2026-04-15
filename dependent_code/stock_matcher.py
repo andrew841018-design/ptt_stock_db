@@ -139,7 +139,8 @@ def run_matcher(batch_size: int = 1000) -> None:
 
     logging.info("[Match] 待處理：%d 篇文章", total)
 
-    tw_sources = {"ptt", "cnyes"}
+    from config import sources_by_market
+    tw_sources = set(sources_by_market("TW"))
     processed  = 0
 
     while True:
