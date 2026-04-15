@@ -36,17 +36,20 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：articles.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：articles 必填欄位無 NULL")
 
-            # 來源專屬檢查：PTT push_count 不允許 NULL
-            # （Reddit 的 push_count 可為 NULL，不在此檢查範圍）
-            cursor.execute(f"""
-                SELECT COUNT(*) FROM {ARTICLES_TABLE} a
-                JOIN {SOURCES_TABLE} s ON s.source_id = a.source_id
-                WHERE s.source_name = %s AND a.push_count IS NULL
-            """, (SOURCES["ptt"]["name"],))
-            ptt_null_push = cursor.fetchone()[0]
-            if ptt_null_push > 0:
-                raise ValueError(f"QA FAILED：PTT 文章 push_count 有 {ptt_null_push} 筆 NULL")
-            logging.info("QA PASSED：PTT push_count 無 NULL")
+            # 來源專屬檢查：has_push_count=True 的來源，push_count 不允許 NULL
+            # （從 config.SOURCES 衍生，新增來源不需改這裡）
+            for key, src in SOURCES.items():
+                if not src.get("has_push_count"):
+                    continue
+                cursor.execute(f"""
+                    SELECT COUNT(*) FROM {ARTICLES_TABLE} a
+                    JOIN {SOURCES_TABLE} s ON s.source_id = a.source_id
+                    WHERE s.source_name = %s AND a.push_count IS NULL
+                """, (src["name"],))
+                null_push = cursor.fetchone()[0]
+                if null_push > 0:
+                    raise ValueError(f"QA FAILED：{src['name']} 文章 push_count 有 {null_push} 筆 NULL")
+                logging.info(f"QA PASSED：{src['name']} push_count 無 NULL")
 
             # ── comments ──────────────────────────────────────────────────
             cursor.execute(f"""

@@ -131,9 +131,11 @@ def _cmd_mongo(_args):
 
 # ─── AI 模型預測（分層） ──────────────────────────────────────────────────────
 
+from config import sources_by_market
+
 _MARKET_SOURCES = {
-    "tw": ["ptt", "cnyes"],
-    "us": ["reddit"],
+    "tw": sources_by_market("TW"),
+    "us": sources_by_market("US"),
 }
 
 _MARKET_PRICES_TABLE = {

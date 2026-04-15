@@ -6,6 +6,9 @@ from schema import create_schema
 from scrapers.ptt_scraper import PttScraper
 from scrapers.cnyes_scraper import CnyesScraper
 from scrapers.reddit_scraper import RedditScraper
+from scrapers.cnn_scraper import CnnScraper
+from scrapers.wsj_scraper import WsjScraper
+from scrapers.marketwatch_scraper import MarketWatchScraper
 from scrapers.tw_stock_fetcher import TwseFetcher
 from scrapers.us_stock_fetcher import UsStockFetcher
 from QA import QA_checks
@@ -28,7 +31,7 @@ logging.basicConfig(
 )
 
 # 新增來源只需在此加入對應 class
-_ARTICLE_SOURCES = [PttScraper, CnyesScraper, RedditScraper]
+_ARTICLE_SOURCES = [PttScraper, CnyesScraper, RedditScraper, CnnScraper, WsjScraper, MarketWatchScraper]
 _STOCK_SOURCES   = [TwseFetcher, UsStockFetcher]  # 股價類，不繼承 BaseScraper，單獨呼叫
 
 

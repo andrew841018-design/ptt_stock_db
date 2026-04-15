@@ -26,7 +26,7 @@
 project/
 ├── dependent_code/
 │   ├── pipeline.py           # 8-step 主流程（schema → extract → transform → pii → bert → fetch_etf+stock_matcher → dw_etl → backup）
-│   ├── config.py             # 集中管理所有常數 + sleep delays（REQUEST_DELAY=0.3, TWSE_DELAY=3）
+│   ├── config.py             # 集中管理所有常數 + SOURCES 唯一 source of truth + sleep delays
 │   ├── schema.py             # PostgreSQL 建表 + index
 │   ├── pg_helper.py          # PostgreSQL 連線管理（context manager）
 │   ├── cache_helper.py       # Redis Cache-Aside helper
@@ -37,6 +37,9 @@ project/
 │   │   ├── cnyes_scraper.py      # 鉅亨網爬蟲
 │   │   ├── reddit_scraper.py     # Reddit 財經版增量爬蟲
 │   │   ├── reddit_batch_loader.py  # Reddit 歷史大量資料載入器（Arctic Shift API）
+│   │   ├── cnn_scraper.py        # CNN 財經新聞爬蟲（Search API + full-text）
+│   │   ├── wsj_scraper.py        # WSJ 財經新聞爬蟲（RSS feeds + Google News RSS）
+│   │   ├── marketwatch_scraper.py# MarketWatch 財經新聞爬蟲（RSS feeds + Google News RSS）
 │   │   ├── scraper_schemas.py    # Pydantic 資料驗證 schema
 │   │   ├── tw_stock_fetcher.py   # 0050 股價抓取（TWSE API）
 │   │   └── us_stock_fetcher.py   # VOO 股價抓取（yfinance）
@@ -1154,6 +1157,59 @@ MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 tabl
 
 - 10 次迭代 code review 僅發現上述 1 個問題（type hint 不一致），程式碼品質持續穩定
 - 連續三次 scheduled update（04-11、04-13、04-14）發現的問題數遞減（3 → 2 → 1），codebase 趨於成熟
+
+#### 下次繼續
+
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
+- [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論
+- [ ] JWT Authentication
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-15
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `dw_schema.py` DDL 修正 | `CREATE_DIM_MARKET` 只定義了 `market_id` 和 `market_code`，但 `dw_etl.py populate_dim_market()` INSERT 4 欄位（market_code, market_name, currency, timezone）；新 DB 建表後 INSERT 會失敗。補上 `market_name VARCHAR(50)`、`currency VARCHAR(10)`、`timezone VARCHAR(50)` |
+
+#### 備註
+
+- 10 次迭代 code review 僅發現上述 1 個 DDL/DML 不一致問題
+- 連續四次 scheduled update（04-11、04-13、04-14、04-15）發現的問題數：3 → 2 → 1 → 1，codebase 穩定
+
+#### 完成項目（新增 CNN + WSJ + MarketWatch 來源 + config.py 重構）
+
+| 項目 | 說明 |
+|------|------|
+| `cnn_scraper.py` 新建 | CNN 財經新聞爬蟲（Search API + full-text fetching），繼承 BaseScraper |
+| `wsj_scraper.py` 新建 | WSJ 財經新聞爬蟲（RSS feeds + Google News RSS fallback），繼承 BaseScraper |
+| `marketwatch_scraper.py` 新建 | MarketWatch 財經新聞爬蟲（3 RSS feeds + Google News RSS），繼承 BaseScraper |
+| `config.py` 重構 | SOURCES dict 升級為唯一 source of truth：加入 market/lang/stock/url_pattern/has_push_count/color 欄位；新增 `sources_by_market()` / `sources_by_lang()` helper；新增 `SOURCE_META` / `SOURCE_MARKET_MAP` / `SOURCE_COLORS` 衍生 dict |
+| `pipeline.py` 更新 | `_ARTICLE_SOURCES` 加入 CnnScraper / WsjScraper / MarketWatchScraper |
+| `dw_etl.py` 更新 | hardcoded `SOURCE_META` dict 改為 `from config import SOURCE_META` |
+| `ai_model_prediction.py` 更新 | US/TW 來源改用 `sources_by_market("US")` / `sources_by_market("TW")` |
+| `cli.py` 更新 | `_MARKET_SOURCES` 改用 `sources_by_market()` 衍生 |
+| `visualization.py` 全面改寫 | 新增來源多選 sidebar、"Sentiment by Source" 多線圖、TW/US 分離相關性分析；SQL 查詢改用 config 衍生 |
+| `plt_function.py` 更新 | 新增 `plot_sentiment_by_source()`；標題改為通用（移除 "PTT" 前綴）；`market_label` 參數化 |
+| `ge_validation.py` 動態化 | 迴圈 `SOURCES.items()` 動態衍生 URL pattern 和 push_count 檢查規則 |
+| `QA.py` 動態化 | push_count NULL 檢查改為迴圈 `has_push_count=True` 的來源 |
+| `labeling_tool.py` 更新 | 語言分類改用 `sources_by_lang("zh")` / `sources_by_lang("en")` |
+| `stock_matcher.py` 更新 | tw_sources 改用 `set(sources_by_market("TW"))` |
+| `backup.py` 修正 | `datetime.now()` → `datetime.utcnow()`（與 codebase 一致） |
+| `cmd.cpython-39.pyc` 清除 | cmd.py → cli.py 改名後的殘留快取導致 ETL 失敗（AttributeError: module 'cmd' has no attribute 'Cmd'）|
+| `feedparser` 安裝 | WSJ / MarketWatch RSS 解析所需，已在 conda env 安裝 |
+
+#### 設計決策（config.py 重構）
+
+- **Single Source of Truth**：`config.py` 的 `SOURCES` dict 是所有來源的唯一定義點；其他模組透過 helper functions（`sources_by_market()`、`sources_by_lang()`）和衍生 dict（`SOURCE_META`、`SOURCE_MARKET_MAP`、`SOURCE_COLORS`）取得來源資訊
+- **新增來源只需改 3 個檔案**：(1) `config.py`（加一筆 SOURCES entry）(2) 新爬蟲檔案（繼承 BaseScraper）(3) `pipeline.py`（在 `_ARTICLE_SOURCES` 加一行）
+- **不需要動的檔案**：GE、QA、DW ETL、AI model、visualization、cli、labeling_tool、stock_matcher — 全部從 config 衍生，新來源自動涵蓋
+- **市場級 vs 來源級**：`labeling_tool.py` 的 zh/en 分類、`stock_matcher.py` 的 tw/us if/else 是市場級邏輯，只在新增市場時才需修改
 
 #### 下次繼續
 

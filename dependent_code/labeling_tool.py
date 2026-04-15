@@ -29,8 +29,9 @@ LABEL_DISPLAY  = {"positive": "✅ 正面", "neutral": "⚪ 中性", "negative":
 LABEL_COLORS   = {"positive": "green",   "neutral": "gray",   "negative": "red"}
 
 # 中文來源（對比 0050）、英文來源（對比 VOO）
-ZH_SOURCES = [SOURCES["ptt"]["name"], SOURCES["cnyes"]["name"]]
-EN_SOURCES = [SOURCES["reddit"]["name"]]
+from config import sources_by_lang
+ZH_SOURCES = sources_by_lang("zh")
+EN_SOURCES = sources_by_lang("en")
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
