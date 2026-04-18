@@ -1,9 +1,7 @@
 import logging
-from datetime import datetime
 from typing import Optional
 
 from scrapers.base_scraper import BaseScraper
-from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES
 
 _SOURCE     = SOURCES["reddit"]
@@ -36,7 +34,8 @@ class RedditScraper(BaseScraper):
         https://arctic-shift.photon-reddit.com/api/posts/search
     """
 
-    EARLY_STOP_PAGES = 3
+    # EARLY_STOP_PAGES 走 config（ptt / cnyes / reddit 共用）
+    from config import EARLY_STOP_EMPTY_PAGES as EARLY_STOP_PAGES
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -114,7 +113,7 @@ class RedditScraper(BaseScraper):
 
         created_utc = post.get("created_utc")# html timestamp欄位
         try:
-            published_at = datetime.utcfromtimestamp(float(created_utc))
+            published_at = self.ts_to_dt(float(created_utc))
         except (ValueError, TypeError):
             logging.warning(f"Reddit 無法解析時間：{created_utc!r}，略過 {url}")
             return None
@@ -132,9 +131,6 @@ class RedditScraper(BaseScraper):
             "push_count":   push_count,
             "comments":     [],             # 不爬留言（降低 API 壓力）
         }
-        try:
-            ArticleSchema(**article)
-        except Exception as e:
-            logging.warning(f"Reddit 貼文驗證失敗，略過 {url}：{e}")
+        if not self.validate_article(article, "Reddit"):
             return None
         return article

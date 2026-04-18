@@ -21,7 +21,7 @@ def plot_sentiment_trend(df: pd.DataFrame) -> plt.Figure:
     daily_sentiment=df.groupby('Date')['Article_Sentiment_Score'].mean()
     ax.plot(daily_sentiment.index,daily_sentiment.values)
     fig.autofmt_xdate()
-    ax.set_title('Ptt Stock Daily Sentiment Trend')
+    ax.set_title('Daily Sentiment Trend')
     ax.set_xlabel('Date')
     ax.set_ylabel('Average Article Sentiment Score')
     return fig
@@ -89,31 +89,36 @@ def plot_daily_article_count(df: pd.DataFrame) -> plt.Figure:
     ax.bar(daily_count.index,daily_count.values)
     ax.set_xlabel('Date')
     ax.set_ylabel('Article Count')
-    ax.set_title('Ptt Stock Daily Article Count')
+    ax.set_title('Daily Article Count')
     return fig
 
 
-def plot_sentiment_vs_stock(df: pd.DataFrame, stock_name: str) -> plt.Figure:
+def plot_sentiment_vs_stock(df: pd.DataFrame, stock_name: str, market_label: str = "") -> plt.Figure:
     """
     情緒分數 vs 隔日股價漲跌散布圖。
     df 需包含欄位：avg_sentiment、next_day_change
+    market_label：圖表前綴（e.g. "TW" / "US"），留空則不顯示
     """
     fig, ax = plt.subplots()
     ax.scatter(df['avg_sentiment'], df['next_day_change'], alpha=0.6)
     ax.axhline(y=0, color='r', linestyle='--', linewidth=0.8)  # 漲跌 0 基準線
     ax.axvline(x=0, color='r', linestyle='--', linewidth=0.8)  # 情緒 0 基準線
-    ax.set_xlabel('PTT 平均情緒分數')
+    prefix = f'{market_label} ' if market_label else ''
+    ax.set_xlabel(f'{prefix}平均情緒分數')
     ax.set_ylabel('隔日漲跌（元）')
-    ax.set_title(f'PTT 情緒 vs {stock_name} 隔日漲跌')
+    ax.set_title(f'{prefix}情緒 vs {stock_name} 隔日漲跌')
     return fig
 
 
-def plot_sentiment_and_price_trend(df: pd.DataFrame, stock_name: str) -> plt.Figure:
+def plot_sentiment_and_price_trend(df: pd.DataFrame, stock_name: str, market_label: str = "") -> plt.Figure:
     """
     情緒分數與隔日漲跌趨勢雙軸折線圖。
     df 需包含欄位：sentiment_date、avg_sentiment、next_day_change
+    market_label：圖表前綴（e.g. "TW" / "US"），留空則不顯示
     """
     fig, ax1 = plt.subplots()
+
+    prefix = f'{market_label} ' if market_label else ''
 
     # 左軸：情緒分數
     ax1.plot(df['sentiment_date'], df['avg_sentiment'], color='steelblue', label='情緒分數')
@@ -128,5 +133,30 @@ def plot_sentiment_and_price_trend(df: pd.DataFrame, stock_name: str) -> plt.Fig
     ax2.tick_params(axis='y', labelcolor='darkorange')
 
     fig.autofmt_xdate()
-    ax1.set_title(f'PTT 情緒 vs {stock_name} 隔日漲跌趨勢')
+    ax1.set_title(f'{prefix}情緒 vs {stock_name} 隔日漲跌趨勢')
+    return fig
+
+
+def plot_sentiment_by_source(df: pd.DataFrame) -> plt.Figure:
+    """
+    各來源每日平均情緒折線圖（同一張圖多條線）。
+    df 需包含欄位：Date、Article_Sentiment_Score、Source
+    """
+    fig, ax = plt.subplots()
+
+    # 來源配色：從 config.SOURCE_COLORS 衍生，新增來源不需改這裡
+    from config import SOURCE_COLORS
+    _COLORS = SOURCE_COLORS
+
+    for source_name, group in df.groupby('Source'):
+        daily = group.groupby('Date')['Article_Sentiment_Score'].mean()
+        color = _COLORS.get(source_name, None)
+        ax.plot(daily.index, daily.values, label=source_name, color=color, alpha=0.8)
+
+    ax.legend(loc='upper left', fontsize=10)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Average Sentiment Score')
+    ax.set_title('Sentiment Trend by Source')
+    fig.autofmt_xdate()
+    fig.tight_layout()
     return fig

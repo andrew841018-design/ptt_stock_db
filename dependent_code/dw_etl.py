@@ -6,7 +6,7 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
   2. populate_dim_source()     - 從 OLTP sources 同步來源維度
   3. populate_dim_stock()      - 預設種入 0050 / VOO（幂等）
   4. populate_fact()           - 每日每來源情緒聚合，ON CONFLICT DO UPDATE（upsert）
-  5. refresh_all()             - 刷新 Data Mart（mart_daily_summary / mart_hot_stocks）
+  5. refresh_all()             - 刷新 Data Mart（mart_daily_summary）
   6. refresh_mv()              - 刷新 Materialized View（mv_market_summary，市場層級聚合）
 
 支援增量：每次只處理自上次 ETL 以來有新文章的日期（不全量重算）
@@ -20,12 +20,8 @@ from data_mart import refresh_all
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 來源屬性對應表（populate_dim_source 用）
-SOURCE_META: dict[str, dict] = {
-    "ptt":    {"market": "TW", "stock": "0050"},
-    "cnyes":  {"market": "TW", "stock": "0050"},
-    "reddit": {"market": "US", "stock": "VOO"},
-}
+# 來源屬性對應表：從 config.SOURCES 自動衍生，新增來源不需改這裡
+from config import SOURCE_META
 
 
 # ─── Step 0：dim_market（市場維度，Snowflake 最上層）─────────────────────────────
@@ -39,13 +35,12 @@ def populate_dim_market(cur) -> None:
     ON CONFLICT DO NOTHING = 已存在就跳過，不報錯（幂等設計，重複執行不會壞）。
     """
     markets = [
-        ("TW",),
-        ("US",),
+        ("TW", "台灣股市", "TWD", "Asia/Taipei"),
+        ("US", "美國股市", "USD", "America/New_York"),
     ]
-    # dim_market is table,market_code is column
     cur.executemany("""
-        INSERT INTO dim_market (market_code)
-        VALUES (%s)
+        INSERT INTO dim_market (market_code, market_name, currency, timezone)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (market_code) DO NOTHING
     """, markets)
     logging.info("[DW ETL] dim_market ready (%d markets)", len(markets))
@@ -104,40 +99,16 @@ def populate_dim_stock(cur) -> None:
 def populate_fact(cur) -> None:
     """
     每日每來源情緒聚合 → fact_sentiment（upsert）
+    呼叫 PostgreSQL Stored Procedure sp_populate_fact()。
 
-    聚合邏輯：
-      - avg_sentiment  : 平均情緒分數（來自 sentiment_scores，可能部分文章尚未跑分）
-      - avg_push_count : 平均推噓數
-      - article_count  : 當日文章數
-    source_name 直接 denormalize 進 fact，查詢時不需再 JOIN dim_source。
+    SP 內部邏輯：
+      - 4 表 JOIN（articles + sources + dim_source + sentiment_scores）
+      - GROUP BY 每日每來源聚合
+      - ON CONFLICT UPSERT（增量更新）
+      - source_name 直接 denormalize 進 fact，查詢時不需再 JOIN dim_source
     """
-    cur.execute("""
-        INSERT INTO fact_sentiment
-            (fact_date, source_id, stock_symbol, source_name, article_count, avg_sentiment, avg_push_count)
-        SELECT
-            a.published_at::DATE                            AS fact_date,
-            a.source_id,
-            ds.tracked_stock                                AS stock_symbol,   -- 從 dim_source 直接拿
-            s.source_name,
-            COUNT(a.article_id)                             AS article_count,
-            AVG(ss.score)                                   AS avg_sentiment,
-            AVG(a.push_count)                               AS avg_push_count
-        FROM articles a
-        JOIN sources s ON s.source_id = a.source_id
-        JOIN dim_source ds ON ds.source_id = a.source_id   -- 拿 tracked_stock
-        LEFT JOIN sentiment_scores ss ON ss.article_id = a.article_id
-        GROUP BY
-            a.published_at::DATE,
-            a.source_id,
-            ds.tracked_stock,
-            s.source_name
-        ON CONFLICT (fact_date, source_id) DO UPDATE
-            SET article_count  = EXCLUDED.article_count,
-                avg_sentiment  = EXCLUDED.avg_sentiment,
-                avg_push_count = EXCLUDED.avg_push_count,
-                stock_symbol   = EXCLUDED.stock_symbol
-    """)
-    logging.info("[DW ETL] fact_sentiment upserted: %d rows", cur.rowcount)
+    cur.execute("CALL sp_populate_fact()")
+    logging.info("[DW ETL] fact_sentiment upserted via sp_populate_fact()")
 
 
 # ─── Step 6：Materialized View 刷新 ────────────────────────────────────────────
@@ -180,7 +151,7 @@ def run_etl(do_cluster: bool = False) -> None:
             with conn.cursor() as cur:
                 cluster_fact(cur)
         conn.commit()
-        refresh_all()                  # Step 5：刷新 Data Mart（mart_daily_summary + mart_hot_stocks）
+        refresh_all()                  # Step 5：刷新 Data Mart（mart_daily_summary）
         # Step 6：刷新 Materialized View（需要自己的 connection，REFRESH 不能在剛 rollback 的 cursor 上跑）
         with psycopg2.connect(**PG_CONFIG) as mv_conn:
             with mv_conn.cursor() as mv_cur:
