@@ -62,6 +62,11 @@ SOURCES = {
     "cnyes": {
         "name":           "cnyes",
         "url":            "https://news.cnyes.com/news/cat/tw_stock",
+        # cnyes API 每個 category 只 index 最新 ~1000-2000 篇（結構性上限，翻頁無解）
+        # 爬多 category 最大化覆蓋：
+        #   tw_stock ~984 / wd_stock ~2030 / headline ~1634 / us_stock ~415 / future ~334 / forex ~65
+        # 累計約 ~5500 篇（相比單 category 約 3 倍量）
+        "categories":     ["tw_stock", "wd_stock", "headline", "us_stock", "future", "forex"],
         "num_pages":      1000,
         "page_size":      30,
         "market":         "TW",
@@ -130,9 +135,6 @@ SOURCE_META = {
     for key, src in SOURCES.items()
 }
 
-# visualization.py / ai_model_prediction.py 用：來源 → 市場碼
-SOURCE_MARKET_MAP = {v["name"]: v["market"] for v in SOURCES.values()}
-
 # plt_function.py 用：來源 → 圖表配色
 SOURCE_COLORS = {v["name"]: v.get("color") for v in SOURCES.values() if v.get("color")}
 
@@ -140,6 +142,18 @@ SOURCE_COLORS = {v["name"]: v.get("color") for v in SOURCES.values() if v.get("c
 MAX_RETRY       = 5
 REQUEST_DELAY   = 0.3   # General request interval (seconds), prevents DDOS-style bans
 TWSE_DELAY      = 3     # TWSE official rate limit: at least 3 seconds per request
+EARLY_STOP_EMPTY_PAGES = 3  # 連續 N 頁全為已知文章就 early stop（ptt / cnyes 共用）
+
+# HTTP headers shared by web scrapers
+# Usage: `headers={**DEFAULT_HEADERS, **site_specific}` (site-specific headers override defaults)
+# 通用：User-Agent 偽裝成 Chrome 避免新聞網 403；Accept-Language 讓中英混合網站知道偏好
+# 不放 site-specific headers（如 PTT 的 over18 cookie、Reddit bot UA）——那些留在各自 scraper
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+}
 
 # Database table names
 ARTICLES_TABLE = "articles"

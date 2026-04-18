@@ -17,7 +17,6 @@ Snowflake 延伸（dim_source 多一層正規化）：
 
 Data Mart（獨立 table，ETL TRUNCATE+INSERT 更新）：
 - mart_daily_summary : 每日情緒摘要（儀表板用，source 粒度）
-- mart_hot_stocks    : 熱門股票排行（API 用）
 
 Materialized View（PostgreSQL 特有，REFRESH MATERIALIZED VIEW 更新）：
 - mv_market_summary  : 市場層級聚合（TW vs US），示範 Snowflake 三表 JOIN
@@ -36,7 +35,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 CREATE_DIM_MARKET = """
 CREATE TABLE IF NOT EXISTS dim_market (
     market_id   SERIAL      PRIMARY KEY,
-    market_code VARCHAR(10) NOT NULL UNIQUE   -- 'TW' / 'US'
+    market_code VARCHAR(10) NOT NULL UNIQUE,  -- 'TW' / 'US'
+    market_name VARCHAR(50),
+    currency    VARCHAR(10),
+    timezone    VARCHAR(50)
 );
 """
 
@@ -100,16 +102,6 @@ CREATE TABLE IF NOT EXISTS mart_daily_summary (
 );
 """
 
-CREATE_MART_HOT_STOCKS = """
-CREATE TABLE IF NOT EXISTS mart_hot_stocks (
-    report_date   DATE         NOT NULL,
-    source_name   VARCHAR(100) NOT NULL,
-    push_count    INTEGER      NOT NULL DEFAULT 0,
-    article_count INTEGER      NOT NULL DEFAULT 0,
-    PRIMARY KEY (report_date, source_name)
-);
-"""
-
 CREATE_MART_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_mart_daily_date
     ON mart_daily_summary(summary_date);
@@ -145,6 +137,92 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_market_summary_unique
 """
 
 
+# ─── Stored Procedures / Functions ────────────────────────────────────────────
+# PROCEDURE：不回傳值，封裝資料操作（TRUNCATE + INSERT、UPSERT）
+# FUNCTION ：回傳 TABLE，封裝複雜查詢邏輯
+# 好處：SQL 邏輯留在 DB 端，Python 只負責 CALL / SELECT
+# 缺點：版控不如 Python 直觀、跨 DB 不可移植、除錯較難
+# CREATE OR REPLACE：幂等，重複執行只會覆蓋舊版本
+
+CREATE_STORED_PROCEDURES = """
+-- ── SP 1：刷新每日情緒摘要（TRUNCATE + INSERT FROM fact_sentiment）──
+CREATE OR REPLACE PROCEDURE sp_refresh_mart_daily_summary()
+LANGUAGE plpgsql AS $$
+BEGIN
+    TRUNCATE TABLE mart_daily_summary;
+    INSERT INTO mart_daily_summary
+        (summary_date, source_name, total_articles, avg_sentiment, avg_push_count)
+    SELECT
+        f.fact_date              AS summary_date,
+        f.source_name,
+        SUM(f.article_count)     AS total_articles,
+        AVG(f.avg_sentiment)     AS avg_sentiment,
+        AVG(f.avg_push_count)    AS avg_push_count
+    FROM fact_sentiment f
+    GROUP BY f.fact_date, f.source_name;
+END;
+$$;
+
+-- ── SP 2：填充事實表（4 表 JOIN + UPSERT，ETL 核心邏輯）──
+CREATE OR REPLACE PROCEDURE sp_populate_fact()
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO fact_sentiment
+        (fact_date, source_id, stock_symbol, source_name,
+         article_count, avg_sentiment, avg_push_count)
+    SELECT
+        a.published_at::DATE                AS fact_date,
+        a.source_id,
+        ds.tracked_stock                    AS stock_symbol,
+        s.source_name,
+        COUNT(a.article_id)                 AS article_count,
+        AVG(ss.score)                       AS avg_sentiment,
+        AVG(a.push_count)                   AS avg_push_count
+    FROM articles a
+    JOIN sources s          ON s.source_id  = a.source_id
+    JOIN dim_source ds      ON ds.source_id = a.source_id
+    LEFT JOIN sentiment_scores ss ON ss.article_id = a.article_id
+    GROUP BY
+        a.published_at::DATE,
+        a.source_id,
+        ds.tracked_stock,
+        s.source_name
+    ON CONFLICT (fact_date, source_id) DO UPDATE
+        SET article_count  = EXCLUDED.article_count,
+            avg_sentiment  = EXCLUDED.avg_sentiment,
+            avg_push_count = EXCLUDED.avg_push_count,
+            stock_symbol   = EXCLUDED.stock_symbol;
+END;
+$$;
+
+-- ── FN 1：取近 N 天加權平均情緒（FUNCTION 回傳 TABLE）──
+-- 多來源用 total_articles 做加權，避免「平均的平均」失準
+-- 用法：SELECT * FROM fn_get_daily_sentiment(30)
+CREATE OR REPLACE FUNCTION fn_get_daily_sentiment(p_days INTEGER)
+RETURNS TABLE (
+    summary_date   DATE,
+    total_articles BIGINT,
+    avg_sentiment  NUMERIC
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        m.summary_date,
+        SUM(m.total_articles)::BIGINT                       AS total_articles,
+        SUM(m.avg_sentiment * m.total_articles)
+            / NULLIF(SUM(m.total_articles), 0)              AS avg_sentiment
+    FROM mart_daily_summary m
+    # || ' days' 是 PostgreSQL 的字串拼接語法，將 p_days 轉換為字串並拼接 ' days'
+    WHERE m.summary_date >= CURRENT_DATE - (p_days || ' days')::INTERVAL
+      AND m.avg_sentiment IS NOT NULL
+    GROUP BY m.summary_date
+    ORDER BY m.summary_date DESC;
+END;
+$$;
+"""
+
+
 def create_dw_schema() -> None:
     """建立 DW 所有資料表、Index 和 Materialized View"""
     conn = None
@@ -169,8 +247,6 @@ def create_dw_schema() -> None:
             # Data Mart tables
             cur.execute(CREATE_MART_DAILY_SUMMARY)
             logging.info("mart_daily_summary created (or already exists)")
-            cur.execute(CREATE_MART_HOT_STOCKS)
-            logging.info("mart_hot_stocks created (or already exists)")
             cur.execute(CREATE_MART_INDEXES)
             logging.info("Data Mart indexes created (or already exist)")
             # Materialized View（Snowflake 三表 JOIN 的市場層級聚合）
@@ -178,6 +254,9 @@ def create_dw_schema() -> None:
             logging.info("mv_market_summary created (or already exists)")
             cur.execute(CREATE_MV_INDEXES)
             logging.info("MV indexes created (or already exist)")
+            # Stored Procedures / Functions
+            cur.execute(CREATE_STORED_PROCEDURES)
+            logging.info("Stored Procedures / Functions created (or replaced)")
         conn.commit()
         logging.info("DW schema setup complete")
     except psycopg2.Error as e:

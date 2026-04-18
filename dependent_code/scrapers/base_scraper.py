@@ -2,10 +2,11 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 import logging
 import time
-from typing import Optional
+from typing import Optional, Union
 import requests
 from pg_helper import get_pg
 from config import ARTICLES_TABLE, COMMENTS_TABLE, SOURCES_TABLE, MAX_RETRY
+from scrapers.scraper_schemas import ArticleSchema
 
 # MongoDB 原始回應存檔（降級設計：MongoDB 掛掉不影響爬蟲）
 try:
@@ -64,6 +65,36 @@ class BaseScraper(ABC):
     @abstractmethod
     def fetch_articles(self) -> list:
         """只定義抽象類別，實作由子類別實現"""
+
+    # ── 爬蟲子類共用 helper（@staticmethod，可用 self.xxx 或 BaseScraper.xxx 呼叫）──
+    # validate_article : Pydantic 驗證 + 標準化 warning log
+    # ts_to_dt         : Unix timestamp（秒 / 毫秒自動偵測） → naive UTC datetime
+
+    @staticmethod
+    def validate_article(article: dict, context: str = "") -> bool:
+        """Pydantic 驗證 + 標準化 warning log。
+
+        Returns:
+            True  → 驗證通過（呼叫端可繼續處理）
+            False → 驗證失敗（呼叫端應跳過該篇）
+        """
+        try:
+            ArticleSchema(**article)
+            return True
+        except Exception as err:
+            url = (article or {}).get("url", "<no url>")
+            prefix = f"{context} " if context else ""
+            logging.warning(f"{prefix}文章驗證失敗，略過 {url}：{err}")
+            return False
+
+    @staticmethod
+    def ts_to_dt(ts: Union[int, float]) -> datetime:
+        """Unix timestamp → naive UTC datetime。
+        >1e12 視為毫秒（cnyes 類），否則視為秒（PTT / Reddit / Binance 類）。
+        """
+        if ts > 1e12:
+            ts = ts / 1000
+        return datetime.utcfromtimestamp(ts)
 
     def _get_with_retry(self, url: str, **kwargs) -> requests.Response:
         """HTTP GET with retry + 原始回應存檔到 MongoDB"""

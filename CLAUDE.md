@@ -1220,6 +1220,28 @@ MV 的 JOIN **在 `REFRESH` 時跑一次就存起來**，查詢時讀快取 tabl
 - [ ] JWT Authentication
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
 
+### 2026-04-16
+
+#### 完成項目（scheduled update — code review）
+
+| 項目 | 說明 |
+|------|------|
+| `visualization.py` 未使用 import 移除 | `from config import` 中的 `SOURCE_MARKET_MAP` 未被使用（僅 `sources_by_market` 函式有用到），已移除 |
+
+#### 備註
+
+- 10 次迭代 code review 僅發現上述 1 個未使用 import
+- 連續五次 scheduled update（04-11 ~ 04-16）發現的問題數：3 → 2 → 1 → 1 → 1，codebase 持續穩定
+
+#### 下次繼續
+
+- [ ] PTT pipeline 跑完後確認 article count
+- [ ] Arctic Shift 跑完後重跑（new no-keyword config）
+- [ ] Run `UsStockFetcher().run()` 填入 VOO 資料
+- [ ] 人工標注 500 篇 → fine-tune BERT → 重新推論
+- [ ] JWT Authentication
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
 ---
 
 ## 使用說明

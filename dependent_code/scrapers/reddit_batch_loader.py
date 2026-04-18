@@ -39,7 +39,6 @@ import requests
 from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
-from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES, MAX_RETRY, REQUEST_DELAY
 REDDIT_BATCH_HISTORY_START  = "2005-01-01" # Reddit 創立年份，批量歷史抓取的起點
 
@@ -179,7 +178,7 @@ class RedditBatchLoader(BaseScraper):
 
         created_utc = post.get("created_utc")# html timestamp欄位
         try:
-            published_at = datetime.utcfromtimestamp(float(created_utc))
+            published_at = self.ts_to_dt(float(created_utc))
         except (ValueError, TypeError):
             return None
 
@@ -195,10 +194,7 @@ class RedditBatchLoader(BaseScraper):
             "push_count":   push_count,
             "comments":     [],
         }
-        try:
-            ArticleSchema(**article)
-        except Exception as e:
-            logging.warning(f"Reddit batch 驗證失敗，略過 {url}：{e}")
+        if not self.validate_article(article, "Reddit batch"):
             return None
         return article
 
