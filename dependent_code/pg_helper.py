@@ -10,10 +10,16 @@ def get_pg(config=None):
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 @contextmanager
 def get_pg_readonly():
@@ -22,5 +28,9 @@ def get_pg_readonly():
     try:
         yield conn
     finally:
-        conn.close()
+        # 與 get_pg() 對稱：server 主動斷線時 close 也會 raise InterfaceError，吞掉避免覆蓋業務例外
+        try:
+            conn.close()
+        except Exception:
+            pass
 

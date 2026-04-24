@@ -13,7 +13,7 @@ CNN / WSJ 的歷史文章，補足 RSS 無法回溯的長尾資料。
   - source 切換：__init__(source="cnn") 或 "wsj"，get_source_info() 回 wayback_cnn / wayback_wsj
 
 與其他爬蟲的分工：
-  - CnnScraper / WsjScraper：抓當下的 RSS + section 頁（近期文章）
+  - CnnScraper / WsjScraper：抓當下的 sitemap（近期文章）
   - WaybackBackfillScraper：補歷史（過去 N 年）
   - 兩者 URL 去重由 BaseScraper._is_duplicate() 統一處理
 """
@@ -52,8 +52,13 @@ _TRACKING_QUERY_PARAMS = frozenset({
 _CDX_URL = "https://web.archive.org/cdx/search/cdx"
 _SNAPSHOT_TEMPLATE = "https://web.archive.org/web/{timestamp}id_/{url}"
 
-# 每個 slice（月+字首）最多拉 5000 筆（前次 15000 timeout）
-_CDX_ROWS_PER_SLICE = 5000
+# 每個 slice（月+字首）最多拉 1000 筆
+# （5000 仍常觸發 504；降到 1000 body 小 5x、response 更快；2026-04-19 修正）
+_CDX_ROWS_PER_SLICE = 1000
+
+# probe 階段每隔 N slice 輸出一次 logging.info 到 stdout，
+# 避免 tqdm 進度條只寫 stderr 導致 launchd 看不到進度
+_PROBE_LOG_EVERY = 10
 
 # HTTP timeout（Wayback 回應較慢，給 120 秒）
 _HTTP_TIMEOUT = 120
@@ -122,7 +127,11 @@ class WaybackBackfillScraper(BaseScraper):
         slices = list(self._build_slices())
         logging.info(f"{self._source_name} 共 {len(slices)} 個 CDX slice 待 probe")
 
-        for prefix in tqdm(slices, desc=f"{self._source_name} CDX probe", file=sys.stderr):
+        # seen URLs（canonical）— probe 階段就用來判斷 early stop 條件
+        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
+        new_url_count = 0  # 累計尚未入庫的新 URL 數，達 max_articles 即可 break
+
+        for idx, prefix in enumerate(tqdm(slices, desc=f"{self._source_name} CDX probe", file=sys.stderr), start=1):
             slice_snapshots = self._probe_slice(prefix)
             for ts, url in slice_snapshots:
                 canonical = self._canonicalize_url(url)
@@ -131,14 +140,30 @@ class WaybackBackfillScraper(BaseScraper):
                 # original_url 保留「最早的那次」對應的版本，因為 Wayback 用它取 snapshot
                 if existing is None or ts < existing[0]:
                     snapshots_by_canonical[canonical] = (ts, url)
+                    if canonical not in seen_canonical:
+                        new_url_count += 1
+
+            # 每 N slice 輸出一次進度（launchd log 才看得到）
+            if idx % _PROBE_LOG_EVERY == 0 or idx == len(slices):
+                logging.info(
+                    f"{self._source_name} CDX slice {idx}/{len(slices)}, "
+                    f"累積 {len(snapshots_by_canonical)} 個唯一 URL（其中 {new_url_count} 篇新）"
+                )
+
+            # Early stop：湊夠 max_articles 的新 URL 就不用再 probe 剩下 slice
+            # 保險起見留 20% buffer（後續 _fetch_snapshot 可能失敗），實際抓時再依 max_articles cut
+            if self._max_articles is not None and new_url_count >= int(self._max_articles * 1.2):
+                logging.info(
+                    f"{self._source_name} probe early stop at slice {idx}/{len(slices)}: "
+                    f"new URL 已 {new_url_count} ≥ {int(self._max_articles * 1.2)}（max_articles × 1.2）"
+                )
+                break
 
         logging.info(f"{self._source_name} CDX 共發現 {len(snapshots_by_canonical)} 個唯一文章 URL")
 
         # 階段二：逐篇抓取 Wayback 快照並解析
-        # DB 裡的歷史 URL 可能是 canonicalize 之前的格式（http vs https 不一），
-        # 所以 seen set 同時收 canonical 版本，避免重複抓
+        # seen_canonical 已在 probe 階段初始化（early-stop 需要），此處沿用
         articles = []
-        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
         targets = [
             (ts, original_url, canonical)
             for canonical, (ts, original_url) in snapshots_by_canonical.items()
@@ -486,4 +511,5 @@ class WaybackBackfillScraper(BaseScraper):
 # 手動執行請改用 cli.py：
 #   python cli.py wayback-backfill cnn --min-year 2015 --max-year 2023
 #   python cli.py wayback-backfill wsj --min-year 2022 --max-articles 500
-# 預設參數版本由 pipeline.py extract() 透過 _wayback_cnn_factory / _wayback_wsj_factory 呼叫
+# 排程執行由 launchd 每日 03:00 觸發（~/Library/LaunchAgents/com.andrew.wayback-backfill.plist）
+# 刻意不加入 pipeline.py 的 _ARTICLE_SOURCES，避免拖慢每小時 ETL

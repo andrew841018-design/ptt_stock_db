@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import (
     ARTICLES_TABLE,
     SENTIMENT_SCORES_TABLE,
+    SOURCES_TABLE,
     STOCK_PRICES_TABLE,
     US_STOCK_PRICES_TABLE,
     AI_MODEL_PREDICTION_RUNS_TABLE,
@@ -72,7 +73,7 @@ def fetch_sentiment(sources: list[str]) -> pd.DataFrame:
                     COUNT(a.article_id)           AS article_count,
                     AVG(COALESCE(a.push_count,0)) AS avg_push_count
                 FROM {ARTICLES_TABLE} a
-                JOIN sources s           ON s.source_id  = a.source_id
+                JOIN {SOURCES_TABLE} s    ON s.source_id  = a.source_id
                 LEFT JOIN {SENTIMENT_SCORES_TABLE} ss ON ss.article_id = a.article_id
                 WHERE s.source_name = ANY(%s)
                 GROUP BY a.published_at::date

@@ -5,7 +5,7 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
   1. populate_dim_market()     - 種入市場維度（TW / US）
   2. populate_dim_source()     - 從 OLTP sources 同步來源維度
   3. populate_dim_stock()      - 預設種入 0050 / VOO（幂等）
-  4. populate_fact()           - 每日每來源情緒聚合，ON CONFLICT DO UPDATE（upsert）
+  4. populate_fact_sentiment() - 每日每來源情緒聚合，ON CONFLICT DO UPDATE（upsert）
   5. refresh_all()             - 刷新 Data Mart（mart_daily_summary）
   6. refresh_mv()              - 刷新 Materialized View（mv_market_summary，市場層級聚合）
 
@@ -15,8 +15,9 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
 import logging
 import psycopg2
 from config import PG_CONFIG
+from pg_helper import get_pg
 from dw_schema import create_dw_schema
-from data_mart import refresh_all
+from data_mart import refresh_all, ensure_sp_schema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -96,10 +97,11 @@ def populate_dim_stock(cur) -> None:
 # fact = 事實表，存數值/度量（幾篇、幾分），透過 FK 指向各維度表
 # 粒度：每日 × 每來源 = 一筆
 
-def populate_fact(cur) -> None:
+def populate_fact_sentiment(cur) -> None:
     """
     每日每來源情緒聚合 → fact_sentiment（upsert）
-    呼叫 PostgreSQL Stored Procedure sp_populate_fact()。
+    呼叫 PostgreSQL Stored Procedure sp_populate_fact_sentiment()
+    （定義於 scripts/init_marts.sql）。
 
     SP 內部邏輯：
       - 4 表 JOIN（articles + sources + dim_source + sentiment_scores）
@@ -107,8 +109,8 @@ def populate_fact(cur) -> None:
       - ON CONFLICT UPSERT（增量更新）
       - source_name 直接 denormalize 進 fact，查詢時不需再 JOIN dim_source
     """
-    cur.execute("CALL sp_populate_fact()")
-    logging.info("[DW ETL] fact_sentiment upserted via sp_populate_fact()")
+    cur.execute("CALL sp_populate_fact_sentiment()")
+    logging.info("[DW ETL] fact_sentiment upserted via sp_populate_fact_sentiment()")
 
 
 # ─── Step 6：Materialized View 刷新 ────────────────────────────────────────────
@@ -127,7 +129,7 @@ def refresh_mv(cur) -> None:
 def cluster_fact(cur) -> None:
     """
     CLUSTER = 按指定 index 重新排列資料在磁碟上的物理順序。
-    範圍查詢（WHERE date_id BETWEEN x AND y）時連續讀取，不用跳來跳去。
+    範圍查詢（WHERE fact_date BETWEEN x AND y）時連續讀取，不用跳來跳去。
     注意：會鎖表，排程在離峰時段執行。
     """
     cur.execute("CLUSTER fact_sentiment USING idx_fact_date")  # fact_date 上的 index
@@ -138,7 +140,8 @@ def cluster_fact(cur) -> None:
 # 完整流程：填維度 → 填事實 → 刷新 Data Mart → API 讀到最新資料
 
 def run_etl(do_cluster: bool = False) -> None:
-    create_dw_schema()                     # Step 0：確保 DW 所有表存在（幂等）
+    create_dw_schema()                     # Step 0a：確保 DW 所有表存在（幂等）
+    ensure_sp_schema()                     # Step 0b：套用 SP/Function 定義（幂等）
     conn = None
     try:
         conn = psycopg2.connect(**PG_CONFIG)
@@ -146,17 +149,17 @@ def run_etl(do_cluster: bool = False) -> None:
             populate_dim_market(cur)   # Step 1：市場維度
             populate_dim_source(cur)   # Step 2：來源維度
             populate_dim_stock(cur)    # Step 3：股票維度
-            populate_fact(cur)         # Step 4：事實表（聚合 OLTP 資料）
+            populate_fact_sentiment(cur)  # Step 4：事實表（聚合 OLTP 資料）
         if do_cluster:
             with conn.cursor() as cur:
                 cluster_fact(cur)
         conn.commit()
         refresh_all()                  # Step 5：刷新 Data Mart（mart_daily_summary）
         # Step 6：刷新 Materialized View（需要自己的 connection，REFRESH 不能在剛 rollback 的 cursor 上跑）
-        with psycopg2.connect(**PG_CONFIG) as mv_conn:
+        # 用 get_pg() context manager 保證 connection 會 close（psycopg2 v2 的 `with conn:` 只管 transaction，不會 close）
+        with get_pg() as mv_conn:
             with mv_conn.cursor() as mv_cur:
                 refresh_mv(mv_cur)
-            mv_conn.commit()
         logging.info("[DW ETL] 完成")
     except psycopg2.Error as e:
         logging.error("[DW ETL] 失敗：%s", e)

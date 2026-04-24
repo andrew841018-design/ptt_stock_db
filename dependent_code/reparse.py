@@ -278,6 +278,13 @@ def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[di
     從 MongoDB raw_html 重新解析 title / content / published_at。
 
     新增 HTML 新聞來源只需在 _HTML_CONTENT_SELECTORS 加 CSS 選擇器。
+
+    複雜度說明（cyclomatic complexity ~33）：
+        多分支是**本質複雜度**，非 bad smell — 3 個新聞來源各自 DOM 結構不同，
+        每個 selector list 需要逐項 try 直到命中。重構為 dispatcher pattern
+        (_PARSERS = {'cnn': _parse_cnn, ...}) 在來源 ≥ 5 時才有 ROI，目前 3 來源
+        inline 反而較易追蹤（一眼看出哪個 selector 該補）。
+
     """
     raw_html = raw_doc.get("raw_html")
     if not raw_html:

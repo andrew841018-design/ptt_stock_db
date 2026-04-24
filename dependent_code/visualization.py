@@ -237,7 +237,7 @@ for market_code, market_name in _MARKETS:
     final_strategy     = df_pred["strategy_cumulative_return"].iloc[-1]
     final_buy_and_hold = df_pred["buy_and_hold_return"].iloc[-1]
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Accuracy",       f"{accuracy * 100:.2f}%")
     col2.metric("策略累積報酬",   f"{(final_strategy - 1) * 100:.2f}%")
     col3.metric("Buy & Hold",     f"{(final_buy_and_hold - 1) * 100:.2f}%")

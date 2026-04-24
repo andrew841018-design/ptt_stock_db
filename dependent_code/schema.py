@@ -161,7 +161,7 @@ def create_schema() -> None:
             api_pw   = os.environ.get("PG_API_PASSWORD",  "api_readonly_2026")
             etl_user = os.environ.get("PG_ETL_USER",      "etl_user")
             etl_pw   = os.environ.get("PG_ETL_PASSWORD",  "etl_write_2026")
-            dbname   = os.environ.get("PG_DBNAME",      "stock_analysis_db")
+            dbname   = os.environ.get("PG_DBNAME",      "ptt_stock")
 
             cur.execute(CREATE_ROLES.format(
                 api_user=api_user, api_pw=api_pw,

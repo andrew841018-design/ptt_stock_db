@@ -1,0 +1,33 @@
+# =============================================================================
+# configmap.yaml
+# -----------------------------------------------------------------------------
+# 集中管理非敏感設定值（資料庫主機、埠號、資料庫名稱、Redis 主機等）。
+# Pod 透過 envFrom 引用此 ConfigMap，避免將設定值 hardcode 在 Deployment 中。
+#
+# 注意：密碼、金鑰等敏感資料請放 secret.yaml，不要放這裡。
+#
+# 用法：kubectl apply -f configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stock-sentiment-config
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+data:
+  # PostgreSQL 連線設定（對應 config.py 的 PG_CONFIG）
+  PG_HOST: "postgres-service"        # K8s Service 名稱，叢集內部 DNS 自動解析
+  PG_PORT: "5432"                    # PostgreSQL 預設埠
+  PG_DBNAME: "ptt_stock"             # 資料庫名稱（與 .env / config.py 一致）
+  PG_USER: "postgres"                # 管理員帳號（DDL / ETL 用）
+  PG_API_USER: "api_user"            # API 唯讀帳號（FastAPI SELECT only）
+
+  # Redis 連線設定（對應 cache_helper.py）
+  REDIS_HOST: "redis-service"        # K8s Service 名稱
+  REDIS_PORT: "6379"                 # Redis 預設埠
+
+  # JWT 設定（非敏感部分）
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRE_MINUTES: "60"

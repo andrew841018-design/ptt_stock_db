@@ -1,0 +1,114 @@
+# ══════════════════════════════════════════════════════════════════
+#  validate.yml — 靜態驗證（不需 deploy 就能抓 90% bug）
+#
+#  每次 push / PR 自動跑；全部 offline、零成本。
+#  抓得到：K8s schema 錯、Dockerfile 壞、dbt ref 壞、Python syntax / test 壞
+# ══════════════════════════════════════════════════════════════════
+name: Validate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-k8s:
+    name: K8s manifests (kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -L -o kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform.tar.gz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Validate k8s/*.yaml
+        run: kubeconform -summary -strict k8s/*.yaml
+
+  validate-dockerfile:
+    name: Dockerfile (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  validate-yaml:
+    name: YAML style (yamllint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install yamllint
+      - name: Lint YAML files
+        run: |
+          yamllint -d 'relaxed' \
+            k8s/ grafana/ prometheus.yml docker-compose.yml \
+            dbt/*.yml dbt/models/
+
+  validate-dbt:
+    name: dbt parse
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: stock_analysis_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Install dbt
+        run: pip install "dbt-core==1.10.*" "dbt-postgres==1.9.*"
+      - name: dbt deps + parse
+        working-directory: dbt
+        env:
+          PG_HOST: localhost
+          PG_PORT: 5432
+          PG_USER: postgres
+          PG_PASSWORD: pw
+          PG_DBNAME: stock_analysis_db
+        run: |
+          dbt deps
+          dbt parse
+
+  validate-python:
+    name: Python (syntax + pytest)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: stock_analysis_db
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Install deps
+        run: pip install -r dependent_code/requirements.txt
+      - name: Syntax check
+        run: python -c "import ast, pathlib; [ast.parse(p.read_text()) for p in pathlib.Path('dependent_code').rglob('*.py')]"
+      - name: pytest
+        working-directory: dependent_code
+        env:
+          PG_HOST: localhost
+          PG_PASSWORD: pw
+          REDIS_HOST: localhost
+        run: pytest test_api.py -v

@@ -196,6 +196,7 @@ cython_debug/
 
 # Claude Code
 .claude/settings.local.json
+.deps_last_checked
 
 # SQLite database files
 *.db
@@ -223,3 +224,20 @@ google_credentials.json
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# dbt
+dbt/dbt_packages/
+dbt/.user.yml
+dbt/target/
+dbt/logs/
+
+# K8s secret 本機副本（含真密碼的自訂檔）
+k8s/*.local.yaml
+
+.DS_Store
+
+# 面試準備（個人筆記，不進版控）
+docs/interview_prep/
+
+# ML 模型與訓練產物
+**/models/

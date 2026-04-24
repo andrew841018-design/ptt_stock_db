@@ -9,6 +9,10 @@ LOG_FILE="$PROJECT_DIR/logs/etl_$(date +%Y%m%d).log"
 
 mkdir -p "$PROJECT_DIR/logs" #p－已存在不報錯
 
+# 記錄本次開始前的行數（同一天多次執行共用 log 檔，summary 只掃本次新增的行）
+LOG_START_LINE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+LOG_START_LINE=$((LOG_START_LINE + 1))
+
 #$1-first input message
 #tee -a "$LOG_FILE" 將輸出同時寫入log file和終端機
 log() {
@@ -80,9 +84,13 @@ fi
 rm -rf "$TMP_DIR"
 log "暫存目錄已清除"
 
-# 7. 掃描 log 統計 ERROR / WARNING(default 0)
-ERROR_COUNT=$(grep -c " - ERROR - " "$LOG_FILE" 2>/dev/null || echo 0)
-WARNING_COUNT=$(grep -c "WARNING" "$LOG_FILE" 2>/dev/null || echo 0)
+# 7. 掃描 log 統計 ERROR / WARNING（只掃本次執行新增的行，避免前幾次 summary 被重複計算）
+# 同一天的 log 共用同一個檔案（tee -a），只從本次開始行往下 grep
+# Python logging 格式：%(asctime)s [%(levelname)s] %(message)s → 用 \[ERROR\] 精確比對
+# Shell 腳本錯誤格式：ERROR: <message> → 用 ERROR: 比對
+# 故意排除 ERROR 數量:/ERROR 數量：等 summary 行，避免計入自己
+ERROR_COUNT=$(tail -n +"$LOG_START_LINE" "$LOG_FILE" 2>/dev/null | grep -cE "\[ERROR\]|ERROR:" || echo 0)
+WARNING_COUNT=$(tail -n +"$LOG_START_LINE" "$LOG_FILE" 2>/dev/null | grep -c "WARNING" || echo 0)
 
 log "---------- 執行摘要 ----------"
 log "ERROR 數量：$ERROR_COUNT"
@@ -90,8 +98,7 @@ log "WARNING 數量：$WARNING_COUNT"
 
 if [ "$ERROR_COUNT" -gt 0 ]; then
     log "⚠️  發現 ERROR，列出詳細："
-    # | 就是pipe，把左側指令的輸出作為右側指令的輸入，所以line就是從左側的輸出讀取    
-    grep " - ERROR - " "$LOG_FILE" | while read -r line; do
+    tail -n +"$LOG_START_LINE" "$LOG_FILE" | grep -E "\[ERROR\]|ERROR:" | while read -r line; do
         log "  >> $line"
     done
 fi
