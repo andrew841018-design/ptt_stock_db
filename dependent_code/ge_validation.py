@@ -4,7 +4,7 @@ from great_expectations.dataset import PandasDataset
 from pg_helper import get_pg
 from config import ARTICLES_TABLE, SOURCES_TABLE, SOURCES, US_STOCK_PRICES_TABLE
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 def _log_result(r) -> None:
@@ -47,9 +47,12 @@ def ge_validate():
         ge_src = PandasDataset(src_df)
 
         # URL 格式檢查（只在 config 有設定 url_pattern 時執行）
+        # GE 0.18.19 的 expect_column_values_to_match_regex 底層用 re.match（anchor 在字串開頭），
+        # 但 config 的 url_pattern 是「URL 中某段子字串」語意（search），URL 開頭是 https://... 會 FAIL，
+        # 所以補 .* 前綴讓 re.match 能從任意位置開始比對
         url_pattern = src.get("url_pattern")
         if url_pattern:
-            _log_result(ge_src.expect_column_values_to_match_regex('Url', url_pattern))
+            _log_result(ge_src.expect_column_values_to_match_regex('Url', f".*{url_pattern}"))
 
         # push_count 檢查（只對有推文數的來源執行）
         if src.get("has_push_count"):

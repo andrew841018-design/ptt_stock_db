@@ -1,0 +1,26 @@
+name: 'ptt_sentiment'
+version: '1.0.0'
+config-version: 2
+
+profile: 'ptt_sentiment'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  ptt_sentiment:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+
+# var 用 env_var 會走 Jinja rendering，sources.yml schema 無法二次 render
+# 改成 target-based：sources.yml 直接用 {{ target.schema }}

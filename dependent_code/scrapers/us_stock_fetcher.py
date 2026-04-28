@@ -1,6 +1,8 @@
 import sys
+import time
 import logging
 from datetime import date
+from typing import Optional
 from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
 import pandas as pd
@@ -12,6 +14,9 @@ from config import US_STOCK_PRICES_TABLE
 US_STOCK_MONTHS = 120  # 每次抓幾個月的歷史資料
 
 _TICKER = "VOO"  # 固定追蹤單一標的
+
+_YF_MAX_RETRIES = 3
+_YF_BACKOFF_SECONDS = (5, 15, 30)  # exponential backoff between retries
 
 
 class UsStockFetcher:
@@ -38,9 +43,30 @@ class UsStockFetcher:
         從 yfinance 抓 VOO 歷史日線資料。
         回傳 list of dict，每筆對應一個交易日。
         漲跌 change = 當日收盤 - 前一日收盤。
+
+        yfinance 在 rate limit 期間 internal state 可能為 None，
+        導致 'NoneType' object is not subscriptable，需 retry。
         """
         start = (date.today() - relativedelta(months=US_STOCK_MONTHS)).strftime("%Y-%m-%d")
-        hist = yf.Ticker(_TICKER).history(start=start)
+
+        hist = None
+        last_err: Optional[Exception] = None
+        for attempt in range(_YF_MAX_RETRIES):
+            try:
+                hist = yf.Ticker(_TICKER).history(start=start)
+                break
+            except Exception as exc:
+                last_err = exc
+                if attempt < _YF_MAX_RETRIES - 1:
+                    backoff = _YF_BACKOFF_SECONDS[attempt]
+                    logging.warning(
+                        f"yfinance {_TICKER} 第 {attempt + 1} 次失敗：{exc}；{backoff}s 後重試"
+                    )
+                    time.sleep(backoff)
+
+        if hist is None:
+            logging.warning(f"yfinance {_TICKER} 連續 {_YF_MAX_RETRIES} 次失敗：{last_err}，本輪略過")
+            return []
 
         if hist.empty:
             logging.warning(f"yfinance 回傳空資料：{_TICKER}")

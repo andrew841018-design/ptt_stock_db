@@ -1,0 +1,124 @@
+# =============================================================================
+# postgres-deployment.yaml
+# -----------------------------------------------------------------------------
+# PostgreSQL 資料庫的 StatefulSet + Service + PersistentVolumeClaim。
+#
+# - StatefulSet（非 Deployment）：確保 Pod 重啟後仍綁定同一份 PVC，
+#   資料不會因為 Pod 重新排程到不同 Node 而遺失
+# - PVC：1Gi 持久化儲存，Pod 刪除後資料仍保留
+# - Service：ClusterIP（僅叢集內部存取），API/Worker 透過 postgres-service 連線
+# - 資源限制：512Mi 記憶體 / 500m CPU
+#
+# 對應 config.py 的 PG_CONFIG 設定（host=postgres-service, port=5432）
+#
+# 用法：kubectl apply -f postgres-deployment.yaml
+# =============================================================================
+
+# --- PersistentVolumeClaim：宣告持久化儲存空間 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: postgres
+spec:
+  # ReadWriteOnce：同一時間只允許一個 Node 掛載（適合單一資料庫）
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # 1Gi 儲存空間（含 articles / comments / sentiment_scores / DW 表）
+      storage: 1Gi
+
+---
+# --- StatefulSet：有狀態的資料庫部署 ---
+# StatefulSet vs Deployment：
+# - StatefulSet 保證 Pod 名稱固定（postgres-0）、PVC 綁定不變
+# - Deployment 重啟後 Pod 名稱隨機，PVC 可能綁到不同 Pod
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: postgres
+spec:
+  serviceName: "postgres-service"
+  # 資料庫只需 1 個副本（多副本需要 replication 設定，超出本專案範圍）
+  replicas: 1
+  selector:
+    matchLabels:
+      component: postgres
+  template:
+    metadata:
+      labels:
+        app: stock-sentiment
+        component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+
+          # --- 環境變數 ---
+          env:
+            # POSTGRES_DB：容器啟動時自動建立此資料庫
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-sentiment-config
+                  key: PG_DBNAME
+            # POSTGRES_PASSWORD：postgres 超級使用者密碼
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stock-sentiment-secret
+                  key: PG_PASSWORD
+
+          # --- 資源限制 ---
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+          # --- 持久化儲存掛載 ---
+          # 將 PVC 掛載到 PostgreSQL 預設的資料目錄
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+              # subPath 避免 lost+found 目錄干擾 PostgreSQL 初始化
+              subPath: pgdata
+
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+# --- Service：叢集內部存取入口 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: postgres
+spec:
+  # ClusterIP：僅叢集內部可存取（資料庫不需對外暴露）
+  type: ClusterIP
+  selector:
+    component: postgres
+  ports:
+    - name: postgres
+      port: 5432             # Service 埠
+      targetPort: 5432       # 對應容器的 containerPort
+      protocol: TCP

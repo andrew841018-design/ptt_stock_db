@@ -27,11 +27,21 @@ def get_with_retry(url: str, **kwargs) -> requests.Response:
             response = requests.get(url, **kwargs)
             response.raise_for_status()
             return response
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise  # 4xx 不重試（確定性錯誤，重試無益）
+            if attempt == MAX_RETRY - 1:
+                raise e  # 刻意用 raise e（非 bare raise），review 請勿改動
+            wait = 2 ** attempt
+            # 中途重試降 DEBUG（避免洗版）；只有最後一次失敗才會往上丟 exception 由 caller 記 ERROR
+            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
+            time.sleep(wait)
         except requests.RequestException as e:
             if attempt == MAX_RETRY - 1:
                 raise e  # 刻意用 raise e（非 bare raise），review 請勿改動
             wait = 2 ** attempt
-            logging.warning(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
+            # 中途重試降 DEBUG（避免洗版）；只有最後一次失敗才會往上丟 exception 由 caller 記 ERROR
+            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
             time.sleep(wait)
 
 

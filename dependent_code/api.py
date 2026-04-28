@@ -1,15 +1,25 @@
+import time
+import logging
 import pandas as pd
 import datetime
 from typing import Literal, Optional
-from fastapi import FastAPI, Query, HTTPException, Depends
+from fastapi import FastAPI, Query, HTTPException, Depends, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 from pg_helper import get_pg_readonly
 from cache_helper import get_cache, set_cache
-from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE
+from config import (
+    ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE,
+    JWT_EXPIRE_MINUTES,
+)
 from data_mart import get_daily_sentiment
+from auth import create_token, verify_token, authenticate_user
+
+# ── Prometheus metrics（真實接線）─────────────────────────────────────────────
+from metrics import api_request_duration_seconds
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 CACHE_KEY_ARTICLES = "articles_df"
-from auth import create_token, verify_token, authenticate_user
 
 
 # ── Response Models ────────────────────────────────────────────────────────────
@@ -89,6 +99,33 @@ class LoginResponse(BaseModel):
 
 app = FastAPI(title="PTT Stock Sentiment API", description="JWT 保護的情緒分析 API")
 
+# ── Prometheus metrics 接線 ────────────────────────────────────────────────────
+# 啟動 /metrics endpoint（同 port 共用）+ request duration middleware。
+# 用 request.scope["route"].path 取 URL pattern 而非實際 URL，**避免 cardinality 爆炸**
+# （若用 request.url.path，/articles/search?q=xxx 每個 query 都是一個 label → Prometheus 記憶體爆）
+
+@app.middleware("http")
+async def _prom_middleware(request: Request, call_next):
+    """記每次 request 的耗時（用 endpoint pattern 作 label，不用實際 URL）"""
+    start = time.perf_counter()
+    response = await call_next(request)  # 執行實際 endpoint，拿到完整 HTTP 回應
+    elapsed = time.perf_counter() - start  # 計算耗時（秒）
+    # 取 route pattern（如 /articles/{id}）而非實際 URL（如 /articles/123）
+    # 避免每個不同 URL 都產生一個 label → Prometheus cardinality 爆炸
+    route = request.scope.get("route")
+    endpoint = getattr(route, "path", request.url.path) if route else request.url.path
+    api_request_duration_seconds.labels(endpoint=endpoint).observe(elapsed)  # 寫入 Histogram
+    return response  # 原封不動回傳給 client，middleware 只負責計時不修改內容
+
+
+@app.get("/metrics", include_in_schema=False)  # include_in_schema=False：不出現在 Swagger UI
+def metrics_endpoint():
+    """Prometheus scrape endpoint（文字格式，不進 Swagger）"""
+    # generate_latest()：把記憶體裡所有 metrics 序列化成 Prometheus 文字格式
+    # Prometheus 每 15 秒打這個 endpoint 一次，把數字抓走存進時序資料庫
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)  # CONTENT_TYPE_LATEST = text/plain; version=0.0.4
+
+
 PERIOD_MIN         = 1
 PERIOD_MAX         = 30
 ARTICLE_LIMIT_MIN  = 1
@@ -104,7 +141,6 @@ def login(req: LoginRequest) -> LoginResponse:
     """帳密驗證 → 回傳 JWT token"""
     user = authenticate_user(req.username, req.password)
     token = create_token(user["username"], user["role"])
-    from config import JWT_EXPIRE_MINUTES
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -137,8 +173,10 @@ def load_articles_df() -> pd.DataFrame:
         df['Published_Time'] = pd.to_datetime(df['Published_Time'])
         set_cache(CACHE_KEY_ARTICLES, df)
         return df
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"message": "database search failed: " + str(e)})
+    except Exception:
+        # 不把原始 DB 錯誤訊息吐給客戶端（可能暴露 schema/column），僅 server log
+        logging.exception("[API] load_articles_df 失敗")
+        raise HTTPException(status_code=500, detail={"message": "database search failed"})
 
 
 @app.get("/sentiments/today", response_model=TodaySentimentResponse)
@@ -233,6 +271,7 @@ def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=
     """
     try:
         with get_pg_readonly() as conn:
+            # %s 不能放在字串字面量裡（psycopg2 不會展開），改用 (%s * INTERVAL '1 day')
             df = pd.read_sql_query(f"""
                 SELECT
                     m.summary_date         AS sentiment_date,
@@ -243,13 +282,14 @@ def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=
                 FROM mart_daily_summary m
                 JOIN {STOCK_PRICES_TABLE} sp
                     ON sp.trade_date = m.summary_date + INTERVAL '1 day'
-                WHERE m.summary_date >= CURRENT_DATE - INTERVAL '{period} days'
+                WHERE m.summary_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
                   AND m.avg_sentiment IS NOT NULL
                 GROUP BY m.summary_date, sp.change
                 ORDER BY m.summary_date
-            """, conn)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"message": str(e)})
+            """, conn, params=(period,))
+    except Exception:
+        logging.exception("[API] correlation 查詢失敗")
+        raise HTTPException(status_code=500, detail={"message": "database query failed"})
 
     if df.empty:
         raise HTTPException(status_code=404, detail={"message": "查無資料，mart_daily_summary 可能尚未刷新"})
@@ -293,6 +333,7 @@ def health_check() -> HealthResponse:
         with get_pg_readonly() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT 1")#測試用語法，確認db活著
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"message": "database connection failed: " + str(e)})
+    except Exception:
+        logging.exception("[API] health check DB 連線失敗")
+        raise HTTPException(status_code=500, detail={"message": "database connection failed"})
     return {"status": "ok", "message": "db connection is successful"}

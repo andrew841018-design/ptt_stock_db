@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: fact_sentiment
+    description: "事實表：日期 × 來源粒度的情緒統計"
+    columns:
+      - name: fact_date
+        tests: [not_null]
+      - name: source_id
+        tests: [not_null]
+      - name: article_count
+        tests: [not_null]
+      - name: avg_score
+        tests: [not_null]
+
+  - name: mart_daily_summary
+    description: "Data Mart：供 API / 儀表板直讀，加上 pos_ratio / neg_ratio"
+    columns:
+      - name: fact_date
+        tests: [not_null]
+      - name: pos_ratio
+        description: "pos_count / article_count；若無文章為 NULL"

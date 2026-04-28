@@ -1,0 +1,17 @@
+# =============================================================================
+# namespace.yaml
+# -----------------------------------------------------------------------------
+# 建立 stock-sentiment namespace，所有 K8s 資源都部署在此命名空間下。
+# Namespace 提供資源隔離，避免與其他專案的資源名稱衝突。
+#
+# 用法：kubectl apply -f namespace.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stock-sentiment
+  labels:
+    app: stock-sentiment
+    # 標記專案名稱，方便用 label selector 批次操作
+    project: ptt-stock-sentiment

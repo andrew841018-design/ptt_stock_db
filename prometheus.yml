@@ -1,0 +1,22 @@
+# ============================================================
+# Prometheus 設定檔
+# 抓取 FastAPI 應用的 metrics endpoint（port 8001），確定api的回應速度沒有變慢
+# 監控自己（localhost:9090),確定prometheus沒掛掉
+# ============================================================
+
+global:
+  # 抓取間隔：每 15 秒向所有 target 發送一次 HTTP GET
+  scrape_interval: 15s
+  # 評估 alerting rules 的間隔
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus 自身指標
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # FastAPI 應用指標（metrics endpoint 在 port 8001；metrics_path 預設就是 /metrics，省略）
+  - job_name: "fastapi"
+    static_configs:
+      - targets: ["api:8001"]
