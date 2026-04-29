@@ -456,6 +456,10 @@ schema → extract（PTT + 鉅亨網 + Reddit + CNN + WSJ + MarketWatch + TWSE +
 - [x] GE / QA 動態化：迴圈 SOURCES.items() 衍生檢查規則，新增來源不需改 GE/QA 程式碼
 - [x] visualization / AI model / DW ETL / cli / labeling_tool 全部改用 config 衍生，不再 hardcode 來源清單
 - [x] backup.py 時區修正（datetime.now() → datetime.utcnow()）
+- [x] pipeline.py update_dependencies stamp 時區修正（3 處 `datetime.now()` → `datetime.utcnow()`，與 codebase 一致）
+- [x] reddit_scraper.py JSON 解析防禦（`response.json()` 移進 try/except，Reddit 回傳被截斷 response 時降為 warning + break，不中斷其他來源）
+- [x] cli.py `_cmd_pipeline` 移除未使用 `os` import（pyflakes 全綠）
+- [x] dependent_code/__pycache__ 幽靈 pyc 清除（backtest / fetch_etf_holdings / looker_export / perf_tuning / stock_matcher 共 7 個檔；source 已刪但 pyc 殘留會造成幽靈 import）
 - [x] feedparser 安裝（WSJ / MarketWatch RSS 解析）
 - [x] `cmd.cpython-39.pyc` 殘留快取清除（cmd.py → cli.py 改名後的遺留問題）
 - [x] Bug fix：pg_helper.py 防禦性 rollback（PG server 意外斷線時雙重 crash 修復，rollback/close 各自包 try/except）

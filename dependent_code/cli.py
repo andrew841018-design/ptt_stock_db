@@ -38,9 +38,21 @@ logging.basicConfig(
 
 # ─── Pipeline Steps ────────────────────────────────────────────────────────────
 
-def _cmd_pipeline(_args):
+def _cmd_pipeline(args):
     from pipeline import run_pipeline
-    run_pipeline()
+    if args.background:
+        import subprocess, sys
+        log_path = _PROJECT_ROOT / "logs" / "pipeline_manual.log"
+        log_path.parent.mkdir(exist_ok=True)
+        with open(log_path, "a") as log:
+            proc = subprocess.Popen(
+                [sys.executable, __file__, "pipeline"],
+                stdout=log, stderr=log,
+                start_new_session=True,
+            )
+        print(f"Pipeline 已在背景啟動，PID: {proc.pid}，log: {log_path}")
+    else:
+        run_pipeline()
 
 
 def _cmd_schema(_args):
@@ -294,6 +306,14 @@ def _cmd_worker(_args):
     os.execvp("celery", ["celery", "-A", "tasks", "worker", "-l", "info", "-c", "4"])
 
 
+def _cmd_celery_trigger(_args):
+    """非同步觸發完整 pipeline（透過 Celery worker）"""
+    os.chdir(_DEPENDENT_CODE)
+    from tasks import run_full_pipeline
+    result = run_full_pipeline.delay()
+    print(f"Pipeline 已加入佇列，task_id: {result.id}")
+
+
 def _cmd_test(args):
     """pytest（預設掃全部 test_*.py，可指定路徑）"""
     os.chdir(_DEPENDENT_CODE)
@@ -329,7 +349,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # Pipeline steps
-    sub.add_parser("pipeline",  help="完整 pipeline（Step 0~7）")
+    p_pl = sub.add_parser("pipeline", help="完整 pipeline（Step 0~7）")
+    p_pl.add_argument("--background", action="store_true", help="背景執行（nohup，log 寫入 logs/pipeline_manual.log）")
     sub.add_parser("schema",    help="建立 DB schema")
     sub.add_parser("extract",   help="爬蟲抓取所有來源")
     sub.add_parser("transform", help="QA + 自動修復 + GE 驗證")
@@ -392,6 +413,7 @@ def main():
     p_dev.add_argument("service", choices=["api", "dashboard", "labeling"])
 
     sub.add_parser("worker", help="啟動 Celery worker（tasks.py）")
+    sub.add_parser("celery-trigger", help="非同步觸發完整 pipeline（需要 worker 在跑）")
 
     p_test = sub.add_parser("test", help="pytest（預設掃全部 test_*.py）")
     p_test.add_argument("path", nargs="?", default=None, help="pytest 路徑（可省略，預設跑全部）")
@@ -432,7 +454,8 @@ def main():
         "services": _cmd_services,
         "logs":     _cmd_logs,
         "dev":      _cmd_dev,
-        "worker":   _cmd_worker,
+        "worker":          _cmd_worker,
+        "celery-trigger":  _cmd_celery_trigger,
         "test":     _cmd_test,
         "k8s-apply-secrets": _cmd_k8s_apply_secrets,
         "k8s-debug":         _cmd_k8s_debug,

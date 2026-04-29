@@ -4,21 +4,18 @@ from dotenv import load_dotenv
 _base = os.path.dirname(__file__)
 load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
 
-# PostgreSQL connection (admin role: create tables / create roles)
-PG_CONFIG = {
-    "host":     os.environ.get("PG_HOST",     "localhost"),
-    "port":     int(os.environ.get("PG_PORT",  "5432")),
-    "dbname":   os.environ.get("PG_DBNAME",   "ptt_stock"),
-    "user":     os.environ.get("PG_USER",     "postgres"),
-    "password": os.environ.get("PG_PASSWORD", ""),
+_PG_BASE = {
+    "host":   os.environ.get("PG_HOST",   "localhost"),
+    "port":   int(os.environ.get("PG_PORT", "5432")),
+    "dbname": os.environ.get("PG_DBNAME", "ptt_stock"),
 }
 
-# PostgreSQL API read-only role (FastAPI, SELECT only)
-PG_API_CONFIG = {
-    **PG_CONFIG,
-    "user":     os.environ.get("PG_API_USER",     "api_user"),
-    "password": os.environ.get("PG_API_PASSWORD", ""),
-}
+# DDL 操作（schema.py / dw_schema.py）
+PG_ADMIN_CONFIG = {**_PG_BASE, "user": os.environ.get("PG_ADMIN_USER", "postgres"),  "password": os.environ.get("PG_ADMIN_PASSWORD", "")}
+# ETL 讀寫（pipeline / get_pg()）
+PG_CONFIG       = {**_PG_BASE, "user": os.environ.get("PG_USER",       "etl_user"),  "password": os.environ.get("PG_PASSWORD",       "etl_write_2026")}
+# API 唯讀（FastAPI）
+PG_API_CONFIG   = {**_PG_BASE, "user": os.environ.get("PG_API_USER",   "api_user"),  "password": os.environ.get("PG_API_PASSWORD",   "")}
 
 # JWT authentication
 JWT_SECRET_KEY     = os.environ.get("JWT_SECRET_KEY",     "change-me-in-production")

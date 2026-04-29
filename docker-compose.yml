@@ -1,6 +1,6 @@
 # ============================================================
 # PTT Stock Sentiment Analysis - Docker Compose
-# 服務：API / Worker / PostgreSQL / Redis / Airflow / Prometheus / Grafana
+# 服務：API / PostgreSQL / Redis / Airflow / Prometheus / Grafana
 # ============================================================
 
 services:
@@ -15,11 +15,9 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
-      PG_HOST: postgres
+      PG_HOST: host.docker.internal  # 實際資料在 Homebrew PG
       REDIS_HOST: redis
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     networks:
@@ -32,27 +30,9 @@ services:
       retries: 3
       start_period: 15s
 
-  # ETL Worker（執行 pipeline.py 完整資料流）
-  worker:
-    build: .
-    container_name: stock_worker
-    command: ["python", "pipeline.py"]
-    env_file: .env
-    environment:
-      PG_HOST: postgres
-      REDIS_HOST: redis
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - stock_net
-    restart: "no"
-
   # ── 資料庫 ──────────────────────────────────────────────
 
-  # PostgreSQL 16（主資料庫，OLTP + DW）
+  # PostgreSQL 16（僅供 Airflow metadata 使用；應用資料在 Homebrew PG）
   postgres:
     image: postgres:16
     container_name: stock_postgres
@@ -60,15 +40,15 @@ services:
       - "5433:5432"
     environment:
       POSTGRES_DB: ${PG_DBNAME:-ptt_stock}
-      POSTGRES_USER: ${PG_USER:-postgres}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-pw}
+      POSTGRES_USER: ${PG_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:-pw}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - stock_net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DBNAME:-ptt_stock}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_ADMIN_USER:-postgres} -d ${PG_DBNAME:-ptt_stock}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -100,10 +80,12 @@ services:
       - "8080:8080"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_USER:-postgres}:${PG_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_ADMIN_USER:-postgres}:${PG_ADMIN_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
       AIRFLOW__CORE__FERNET_KEY: ""
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      PG_HOST: host.docker.internal    # DAG tasks 連 Homebrew PG（實際資料）
+      MONGO_HOST: host.docker.internal # DAG tasks 連 Homebrew MongoDB
     env_file: .env
     volumes:
       - airflow_data:/opt/airflow
@@ -129,10 +111,12 @@ services:
     command: airflow scheduler
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_USER:-postgres}:${PG_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_ADMIN_USER:-postgres}:${PG_ADMIN_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
       AIRFLOW__CORE__FERNET_KEY: ""
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      PG_HOST: host.docker.internal    # DAG tasks 連 Homebrew PG（實際資料）
+      MONGO_HOST: host.docker.internal # DAG tasks 連 Homebrew MongoDB
     env_file: .env
     volumes:
       - airflow_data:/opt/airflow
@@ -164,9 +148,11 @@ services:
           --email admin@example.com || true
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_USER:-postgres}:${PG_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${PG_ADMIN_USER:-postgres}:${PG_ADMIN_PASSWORD:-pw}@postgres:5432/${PG_DBNAME:-ptt_stock}
       AIRFLOW__CORE__FERNET_KEY: ""
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      PG_HOST: host.docker.internal
+      MONGO_HOST: host.docker.internal
     volumes:
       - airflow_data:/opt/airflow
       - ./airflow/dags:/opt/airflow/dags
@@ -180,7 +166,7 @@ services:
 
   # ── 監控 ────────────────────────────────────────────────
 
-  # Prometheus（指標收集，抓取 FastAPI metrics）
+  # Prometheus（指標收集，抓取 FastAPI /metrics endpoint）
   prometheus:
     image: prom/prometheus:latest
     container_name: stock_prometheus

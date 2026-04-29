@@ -54,7 +54,7 @@ def update_dependencies() -> None:
     """
     if _DEPS_STAMP_PATH.exists():
         last = datetime.fromisoformat(_DEPS_STAMP_PATH.read_text().strip())
-        if datetime.now() - last < _DEPS_CHECK_INTERVAL:
+        if datetime.utcnow() - last < _DEPS_CHECK_INTERVAL:
             logging.info("[Deps] 本週已檢查過，跳過")
             return
 
@@ -86,7 +86,7 @@ def update_dependencies() -> None:
     if not upgradable:
         logging.info("[Deps] 無可升級套件")
         _DEPS_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _DEPS_STAMP_PATH.write_text(datetime.now().isoformat())
+        _DEPS_STAMP_PATH.write_text(datetime.utcnow().isoformat())
         return
 
     updated, failed = [], []
@@ -107,7 +107,7 @@ def update_dependencies() -> None:
         logging.warning(f"[Deps] 升級失敗：{', '.join(failed)}")
 
     _DEPS_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _DEPS_STAMP_PATH.write_text(datetime.now().isoformat())
+    _DEPS_STAMP_PATH.write_text(datetime.utcnow().isoformat())
 
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 

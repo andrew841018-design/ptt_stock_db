@@ -6,7 +6,7 @@ import os
 import logging
 import psycopg2
 from dotenv import load_dotenv
-from config import PG_CONFIG, ARTICLE_LABELS_TABLE, AI_MODEL_PREDICTION_RUNS_TABLE
+from config import PG_ADMIN_CONFIG, ARTICLE_LABELS_TABLE, AI_MODEL_PREDICTION_RUNS_TABLE
 
 _base = os.path.dirname(__file__)
 load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
@@ -143,7 +143,7 @@ def create_schema() -> None:
     """建立 PostgreSQL 所有資料表、Index 與角色權限"""
     conn = None
     try:
-        conn = psycopg2.connect(**PG_CONFIG)
+        conn = psycopg2.connect(**PG_ADMIN_CONFIG)
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLES)
             logging.info("Tables created (or already exist)")

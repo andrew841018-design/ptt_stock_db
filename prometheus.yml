@@ -1,6 +1,6 @@
 # ============================================================
 # Prometheus 設定檔
-# 抓取 FastAPI 應用的 metrics endpoint（port 8001），確定api的回應速度沒有變慢
+# 抓取 FastAPI 應用的 metrics endpoint（port 8000 /metrics），確定api的回應速度沒有變慢
 # 監控自己（localhost:9090),確定prometheus沒掛掉
 # ============================================================
 
@@ -16,7 +16,8 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # FastAPI 應用指標（metrics endpoint 在 port 8001；metrics_path 預設就是 /metrics，省略）
+  # FastAPI 應用指標（/metrics endpoint 與 API 同 port 8000，api.py 內嵌 prometheus middleware）
   - job_name: "fastapi"
+    metrics_path: /metrics
     static_configs:
-      - targets: ["api:8001"]
+      - targets: ["api:8000"]

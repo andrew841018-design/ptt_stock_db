@@ -1523,4 +1523,52 @@ yfinance 1.2.0 在 Yahoo Finance API rate-limit 期間，內部 `_history_metada
 
 **原則**：上游 SDK 在 rate-limit / transient 時可能回傳 None 或拋意外 exception，**caller 必須假設不可信**：(1) try/except 包外部 I/O (2) retry with backoff (3) fallback 不中斷主流程。
 
-*最後更新：2026-04-28*
+### try/except 邊界要包到實際拋錯那一行（reddit_scraper.py，2026-04-29）
+
+`fetch_articles()` 原本長這樣：
+
+```python
+try:
+    response = self._get_with_retry(url, params=params, headers=_HEADERS)
+except Exception as e:
+    logging.warning(f"Reddit 第 {page_num + 1} 頁失敗：{e}，停止")
+    break
+
+data = response.json().get("data", {})  # ← try 外面，JSON parse error 直接炸
+```
+
+**Bug**：2026-04-28 20:26:59 觸發 1 次 ERROR — Reddit 回傳被截斷的 JSON（`Unterminated string starting at: line 1 column 216325`），`response.json()` 拋 `json.JSONDecodeError`。HTTP 200 OK 但 body 不完整 → `_get_with_retry` 把 response 正常回來，下一行才在 parse JSON 時炸。整個 RedditScraper 中斷，當輪沒寫入任何 Reddit 文章。
+
+**修法**：把 `data = response.json().get("data", {})` 移進同一個 try block，與 page-level fallback 對齊（warning + break 不中斷其他來源）。
+
+**原則**：try/except 邊界應該**包到 fail-prone 的那一行為止**，不只包 HTTP request。「網路請求成功」不等於「response 內容可解析」——HTTP 200 + 截斷 body 是常見的 transient failure 模式，必須在 caller 側防禦，不能假設 `_get_with_retry` 已處理。
+
+### datetime.now() vs datetime.utcnow() 跨環境一致性（pipeline.py，2026-04-29）
+
+`update_dependencies()` stamp 檔讀寫 3 處用 `datetime.now()`，其餘 codebase（`backup.py` / `mongo_helper.py` / `base_scraper.py` / `scraper_schemas.py` / `cnn_scraper.py` / `reddit_batch_loader.py` / `wayback_backfill.py`）全用 `datetime.utcnow()`。
+
+**Bug 場景**：本機 stamp 內部一致時不會出問題，但雲端排程（K8s CronJob container 通常 UTC）vs 本機（Asia/Taipei）切換時，stamp 的「7 天間隔」會出現 ±8 小時偏移；最壞情況：剛跑完本機開發測試後上 prod，8 小時內又被觸發一次升級（UTC vs TPE 差），重複 pip 操作。
+
+**修法**：3 處 `datetime.now()` 統一改為 `datetime.utcnow()`，與 codebase 全域慣例一致。
+
+**原則**：時間 stamp 跨環境（local / docker / cloud）持久化時**全部走 UTC**。`datetime.now()` 隨主機時區變動，是上雲端 / CI 排程時的常見隱性 bug 來源。
+
+### `__pycache__` 幽靈 import（dependent_code，2026-04-29）
+
+`source.py` 刪除後，`source.cpython-39.pyc` 仍可被 `from source import xxx` 載入（Python 會 fallback 到 pyc）；refactor 後若不清 cache，部分 module 看起來「還活著」實則 source 已不存在 → ghost import。
+
+**Bug 風險**：
+1. 程式碼 review 時看不到對應 source，誤以為已清理
+2. 改名 / 重構後 import 仍能用舊名通過，掩蓋真正的 import error
+3. CI 環境每次 fresh checkout 不帶 pyc，會在 prod 才炸（local pass / CI fail）
+
+**修法**：refactor 完整移除 source 後，主動清 `__pycache__/` 對應 pyc：
+
+```bash
+cd dependent_code/__pycache__
+rm <removed-module>.cpython-*.pyc
+```
+
+**原則**：`source.py` 移除 = `source.*.pyc` 也要移除；任何「應該不存在」的 import 都要主動驗證 cache 也被清。CLAUDE.md 04-15 的 `cmd.cpython-39.pyc` 殘留事件是同類教訓；本次清掉 `backtest` / `fetch_etf_holdings` / `looker_export` / `perf_tuning` / `stock_matcher` 共 7 個 pyc。
+
+*最後更新：2026-04-29*

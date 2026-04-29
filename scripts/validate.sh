@@ -90,7 +90,7 @@ fi
 
 # 7. pytest（如果 PG 能連 + 能 import redis）
 if python -c "import redis, psycopg2" 2>/dev/null && \
-   python -c "import psycopg2; psycopg2.connect(host='localhost', user='postgres', password='pw', dbname='stock_analysis_db', connect_timeout=2).close()" 2>/dev/null; then
+   python -c "import psycopg2; psycopg2.connect(host='localhost', user='postgres', password='pw', dbname='ptt_stock', connect_timeout=2).close()" 2>/dev/null; then
     check "pytest（test_api.py）" \
         bash -c 'set -o pipefail; cd dependent_code && python -m pytest test_api.py -q 2>&1 | tail -3'
 else

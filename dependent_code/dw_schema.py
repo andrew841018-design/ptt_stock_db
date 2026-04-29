@@ -25,7 +25,7 @@ Materialized View（PostgreSQL 特有，REFRESH MATERIALIZED VIEW 更新）：
 
 import logging
 import psycopg2
-from config import PG_CONFIG
+from config import PG_ADMIN_CONFIG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -145,7 +145,7 @@ def create_dw_schema() -> None:
     """建立 DW 所有資料表、Index 和 Materialized View"""
     conn = None
     try:
-        conn = psycopg2.connect(**PG_CONFIG)
+        conn = psycopg2.connect(**PG_ADMIN_CONFIG)
         with conn.cursor() as cur:
             cur.execute(CREATE_DIM_MARKET)
             logging.info("dim_market created (or already exists)")
