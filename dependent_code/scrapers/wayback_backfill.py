@@ -32,11 +32,11 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from tqdm import tqdm
 
 # 與 pipeline.py extract() 同步的並行模式（ThreadPoolExecutor）
-# 2026-04-29 實測：原 8 worker 因 base_scraper.get_with_retry 用 requests.get()
-# 沒共用 Session 導致 8 條獨立 TCP，超 Wayback per-IP cap → ECONNREFUSED
-# 已改 base_scraper 共用 _SESSION（pool_maxsize=20）+ backoff jitter，現可拉回 8/4
-_FETCH_WORKERS = 8           # Phase 2：snapshot HTTP fetch 並行數
-_PROBE_WORKERS = 4           # Phase 1：CDX slice probe 並行數
+# 2026-04-29 慘痛經驗：8 worker 把 Wayback IP-level throttle 觸發後，A (Session)
+# + B (jitter) 都救不回來 — TCP 握手在 server 端就被拒（並非 client 端問題）。
+# 觸發後要等 15-30 min IP cooldown。穩定上限是 4 worker fetch / 2 worker probe。
+_FETCH_WORKERS = 4           # Phase 2：snapshot HTTP fetch 並行數
+_PROBE_WORKERS = 2           # Phase 1：CDX slice probe 並行數
 _FETCH_CHUNK_SIZE = 50       # max_articles 的早停粒度
 
 from scrapers.base_scraper import BaseScraper
