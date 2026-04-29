@@ -32,11 +32,12 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from tqdm import tqdm
 
 # 與 pipeline.py extract() 同步的並行模式（ThreadPoolExecutor）
-# Wayback Machine 對單 IP throttle 嚴格，2026-04-29 實測 8 worker 大量 Connection refused
-# 反而比 serial 慢；降回 4 / 2 給 Wayback 喘息空間
-_FETCH_WORKERS = 4           # Phase 2：snapshot HTTP fetch 並行數（從 8 降到 4）
-_PROBE_WORKERS = 2           # Phase 1：CDX slice probe 並行數（從 4 降到 2）
-_FETCH_CHUNK_SIZE = 50       # max_articles 的早停粒度（每組 submit 完才檢查是否達標）
+# 2026-04-29 實測：原 8 worker 因 base_scraper.get_with_retry 用 requests.get()
+# 沒共用 Session 導致 8 條獨立 TCP，超 Wayback per-IP cap → ECONNREFUSED
+# 已改 base_scraper 共用 _SESSION（pool_maxsize=20）+ backoff jitter，現可拉回 8/4
+_FETCH_WORKERS = 8           # Phase 2：snapshot HTTP fetch 並行數
+_PROBE_WORKERS = 4           # Phase 1：CDX slice probe 並行數
+_FETCH_CHUNK_SIZE = 50       # max_articles 的早停粒度
 
 from scrapers.base_scraper import BaseScraper
 from config import DEFAULT_HEADERS as _HEADERS

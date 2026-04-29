@@ -1,12 +1,23 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 import logging
+import random
 import time
 from typing import Optional, Union
 import requests
+from requests.adapters import HTTPAdapter
 from pg_helper import get_pg
 from config import ARTICLES_TABLE, COMMENTS_TABLE, SOURCES_TABLE, MAX_RETRY
 from scrapers.scraper_schemas import ArticleSchema
+
+# 共用 Session（HTTP keep-alive + 連線池）— 所有 thread 共用同一條
+# 解決原本 requests.get() 每呼叫新開 TCP 的問題：8 worker thread 同時開 8 條 TCP
+# 觸發 Wayback Machine 等服務的 per-IP TCP cap，導致 [Errno 61] Connection refused
+# pool_maxsize 設 20 = 上限 20 條同時連線到同 host，超過會 queue
+_SESSION = requests.Session()
+_adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+_SESSION.mount("https://", _adapter)
+_SESSION.mount("http://", _adapter)
 
 # MongoDB 原始回應存檔（降級設計：MongoDB 掛掉不影響爬蟲）
 try:
@@ -20,11 +31,16 @@ def get_with_retry(url: str, **kwargs) -> requests.Response:
     """
     module-level HTTP GET with retry。
     供所有需要 retry 的地方直接 import 使用（不限於 BaseScraper 子類別）。
-    失敗時 exponential backoff（1, 2, 4... 秒），超過 MAX_RETRY 次則 raise。
+    失敗時 exponential backoff with jitter（1+r, 2+r, 4+r... 秒，r ∈ [0,1)），
+    超過 MAX_RETRY 次則 raise。
+
+    用 _SESSION（HTTP keep-alive + 連線池）取代 requests.get()，避免多 worker thread
+    各自開新 TCP 觸發 Wayback Machine 等服務的 per-IP cap（[Errno 61] ECONNREFUSED）。
+    Jitter 消除 thundering herd（多 worker 失敗後同步退避同步重試的同步惡化）。
     """
     for attempt in range(MAX_RETRY):
         try:
-            response = requests.get(url, **kwargs)
+            response = _SESSION.get(url, **kwargs)
             response.raise_for_status()
             return response
         except requests.HTTPError as e:
@@ -32,16 +48,14 @@ def get_with_retry(url: str, **kwargs) -> requests.Response:
                 raise  # 4xx 不重試（確定性錯誤，重試無益）
             if attempt == MAX_RETRY - 1:
                 raise e  # 刻意用 raise e（非 bare raise），review 請勿改動
-            wait = 2 ** attempt
-            # 中途重試降 DEBUG（避免洗版）；只有最後一次失敗才會往上丟 exception 由 caller 記 ERROR
-            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
+            wait = (2 ** attempt) + random.uniform(0, 1)  # exponential + jitter
+            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait:.1f}s 後重試：{e}")
             time.sleep(wait)
         except requests.RequestException as e:
             if attempt == MAX_RETRY - 1:
-                raise e  # 刻意用 raise e（非 bare raise），review 請勿改動
-            wait = 2 ** attempt
-            # 中途重試降 DEBUG（避免洗版）；只有最後一次失敗才會往上丟 exception 由 caller 記 ERROR
-            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
+                raise e
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            logging.debug(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait:.1f}s 後重試：{e}")
             time.sleep(wait)
 
 
