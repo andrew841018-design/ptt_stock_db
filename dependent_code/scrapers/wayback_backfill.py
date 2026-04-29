@@ -32,10 +32,10 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from tqdm import tqdm
 
 # 與 pipeline.py extract() 同步的並行模式（ThreadPoolExecutor）
-# Wayback Machine 對單 IP 約 ~30 req/s 後易 503，保守 8 worker
-# CDX probe 階段更敏感（HTTP 504/throttle 多），單獨設較低
-_FETCH_WORKERS = 8           # Phase 2：snapshot HTTP fetch 並行數
-_PROBE_WORKERS = 4           # Phase 1：CDX slice probe 並行數
+# Wayback Machine 對單 IP throttle 嚴格，2026-04-29 實測 8 worker 大量 Connection refused
+# 反而比 serial 慢；降回 4 / 2 給 Wayback 喘息空間
+_FETCH_WORKERS = 4           # Phase 2：snapshot HTTP fetch 並行數（從 8 降到 4）
+_PROBE_WORKERS = 2           # Phase 1：CDX slice probe 並行數（從 4 降到 2）
 _FETCH_CHUNK_SIZE = 50       # max_articles 的早停粒度（每組 submit 完才檢查是否達標）
 
 from scrapers.base_scraper import BaseScraper
