@@ -1,10 +1,64 @@
 import pandas as pd
 import datetime
-from typing import Literal
+from typing import Literal, Optional
 from fastapi import FastAPI, Query, HTTPException
+from pydantic import BaseModel
 from pg_helper import get_pg
 from cache_helper import get_cache, set_cache
 from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE, CACHE_KEY_ARTICLES
+
+
+# ── Response Models ────────────────────────────────────────────────────────────
+
+class TodaySentimentResponse(BaseModel):
+    date: str
+    sentiment_score: float
+    message: str
+
+class ChangeSentimentResponse(BaseModel):
+    change_sentiment_score: float
+    message: str
+
+class RecentSentimentResponse(BaseModel):
+    period: int
+    sentiment_score: float
+    message: str
+
+class TopPushArticleItem(BaseModel):
+    Title: str
+    Push_count: Optional[int]
+    Published_Time: datetime.datetime
+    Url: str
+
+class TopPushResponse(BaseModel):
+    note: str
+    limit: int
+    # 會驗證list內是否是裝TopPushArticleItem的dict，通常回傳dict才會以此行是定義
+    articles: list[TopPushArticleItem]
+    message: str
+
+class SearchArticleItem(BaseModel):
+    Title: str
+    Push_count: Optional[int]
+    Published_Time: datetime.datetime
+    Url: str
+
+class SearchResponse(BaseModel):
+    search_articles: list[SearchArticleItem]
+    message: str
+
+class SentimentVsStockPriceItem(BaseModel):
+    sentiment_date: datetime.date
+    avg_sentiment: float
+    next_day_change: float
+
+class SentimentVsStockPriceResponse(BaseModel):
+    period: int
+    data: list[SentimentVsStockPriceItem]
+
+class HealthResponse(BaseModel):
+    status: str
+    message: str
 
 app = FastAPI()
 
@@ -43,8 +97,8 @@ def load_articles_df() -> pd.DataFrame:
         raise HTTPException(status_code=500, detail={"message": "database search failed: " + str(e)})
 
 
-@app.get("/sentiments/today")  # 名稱可自由設計
-def get_today_sentiment():
+@app.get("/sentiments/today", response_model=TodaySentimentResponse)
+def get_today_sentiment() -> TodaySentimentResponse:
     df = load_articles_df()
     df['Published_Date'] = df['Published_Time'].dt.date
     today = df[df['Published_Date'] == df['Published_Date'].max()]
@@ -54,8 +108,8 @@ def get_today_sentiment():
     return {"date": str(today['Published_Date'].max()), "sentiment_score": sentiment_score, "message": "Success"}
 
 
-@app.get("/sentiments/change")
-def get_change_sentiment():
+@app.get("/sentiments/change", response_model=ChangeSentimentResponse)
+def get_change_sentiment() -> ChangeSentimentResponse:
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
@@ -68,7 +122,7 @@ def get_change_sentiment():
     return {"change_sentiment_score": change_score, "message": "Success"}
 
 
-@app.get("/sentiments/recent")
+@app.get("/sentiments/recent", response_model=RecentSentimentResponse)
 def get_recent_sentiment_score(period: int = Query(default=10, ge=PERIOD_MIN, le=PERIOD_MAX)):
     df = load_articles_df()
     if len(df) == 0:
@@ -78,38 +132,43 @@ def get_recent_sentiment_score(period: int = Query(default=10, ge=PERIOD_MIN, le
     if len(recent_data) == 0:
         raise HTTPException(status_code=404, detail={"message": f"No data for the past {period} days"})
     recent_score = round(recent_data['Article_Sentiment_Score'].mean(), 2)
-    return {f"recent_{period}_days_sentiment_score": recent_score, "message": "Success"}
+    return {"period": period, "sentiment_score": recent_score, "message": "Success"}
 
 
-@app.get("/articles/top_push")
+@app.get("/articles/top_push", response_model=TopPushResponse)
 def get_top_push_articles(
-    limit:       int                                      = Query(default=10, ge=ARTICLE_LIMIT_MIN, lt=ARTICLE_LIMIT_MAX + 1),
-    period:      int                                      = Query(default=7,  ge=ARTICLE_PERIOD_MIN, lt=ARTICLE_PERIOD_MAX + 1),
+    limit:       int                                      = Query(default=10, ge=ARTICLE_LIMIT_MIN, le=ARTICLE_LIMIT_MAX),
+    period:      int                                      = Query(default=7,  ge=ARTICLE_PERIOD_MIN, le=ARTICLE_PERIOD_MAX),
     period_type: Literal["day", "week", "month", "year"] = Query(default="day"),
 ):
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
-    df['Published_Time'] = df['Published_Time'].dt.date
+    """
+    python裡，assign兩次會指向同一個物件，用copy第二次才會指向一份新的物件
+    """
+    df = df.copy()
+    df['Published_Date'] = df['Published_Time'].dt.date
     # filter by period
-    end_date  = df['Published_Time'].max()
+    end_date  = df['Published_Date'].max()
     days_map  = {"day": 1, "week": 7, "month": 30, "year": 365}
     total_days = period * days_map[period_type]
     start_date = end_date - datetime.timedelta(days=total_days)
-    filtered_df  = df[df['Published_Time'] >= start_date]
+    filtered_df  = df[df['Published_Date'] >= start_date]
     top_articles = filtered_df.nlargest(limit, 'Push_count')[['Title', 'Push_count', 'Published_Time', 'Url']]
     if len(top_articles) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data"})
     return {
         "note": "Push_count 100 表示『爆』(實際值 ≥ 100)，-100 表示『XX』(實際值 ≤ -100)",
-        f"top_{limit}_articles": top_articles.to_dict(orient="records"),
+        "limit": limit,
+        "articles": top_articles.to_dict(orient="records"),
         "message": "Success"
     }
 
 
-@app.get("/articles/search")
+@app.get("/articles/search", response_model=SearchResponse)
 # ...表示必填，使用者不填入內容會出錯
-def search_articles(keyword: str):
+def search_articles(keyword: str) -> SearchResponse:
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data found"})
@@ -120,8 +179,8 @@ def search_articles(keyword: str):
     return {"search_articles": result[['Title', 'Push_count', 'Published_Time', 'Url']].to_dict(orient="records"), "message": "Success"}
 
 
-@app.get("/correlation/0050")
-def get_correlation(period: int = Query(default=30, ge=1, le=365)):
+@app.get("/correlation/0050", response_model=SentimentVsStockPriceResponse)
+def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=1, le=365)):
     """PTT 情緒分數 vs 0050 隔日漲跌。每個交易日：當日 PTT 平均情緒 → 隔日漲跌價差。"""
     try:
         with get_pg() as conn:
@@ -152,8 +211,8 @@ def get_correlation(period: int = Query(default=30, ge=1, le=365)):
     return {"period": period, "data": df.to_dict(orient="records")}
 
 
-@app.get("/health")
-def health_check():
+@app.get("/health", response_model=HealthResponse)
+def health_check() -> HealthResponse:
     try:
         with get_pg() as conn:
             with conn.cursor() as cursor:

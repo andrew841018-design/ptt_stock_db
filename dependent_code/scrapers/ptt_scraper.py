@@ -1,3 +1,4 @@
+import sys
 import re
 import time
 import logging
@@ -8,6 +9,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES, SKIP_KEYWORDS, MAX_RETRY, PTT_SCRAPE_SLEEP
 
 _SOURCE = SOURCES["ptt"]  # 只讀一次，避免 dict 到處散落
@@ -37,7 +39,7 @@ class PttScraper(BaseScraper):
         articles = []
         url = f"{_SOURCE['url']}/index.html"
 
-        for page_num in tqdm(range(_SOURCE["num_pages"]), desc="PTT 爬蟲頁數"):
+        for page_num in tqdm(range(_SOURCE["num_pages"]), desc="PTT 爬蟲頁數", file=sys.stderr):
             try:
                 page_articles, next_url = self._scrape_list_page(url)
                 articles.extend(page_articles)
@@ -50,9 +52,7 @@ class PttScraper(BaseScraper):
                 continue
 
         return articles
-
-    # ── 以下為 PTT 專用 helper，不對外開放 ───────────────────────────────
-
+        
     def _scrape_list_page(self, url: str) -> tuple:
         """
         爬一頁列表，回傳 (articles_list, prev_page_url)。
@@ -107,7 +107,7 @@ class PttScraper(BaseScraper):
 
         push_txt = nrec_tag.text.strip() if nrec_tag and nrec_tag.text.strip() else "0"
 
-        return {
+        article = {
             "title":        title_tag.text.strip(),
             "content":      content_data["content"],
             "url":          article_url,
@@ -116,6 +116,12 @@ class PttScraper(BaseScraper):
             "push_count":   self._parse_push_count(push_txt),
             "comments":     content_data["comments"],
         }
+        try:
+            ArticleSchema(**article)
+        except Exception as e:
+            logging.warning(f"文章驗證失敗，略過 {article_url}：{e}")
+            return None
+        return article
 
     def _scrape_article_content(self, url: str) -> Optional[dict]:
         """
@@ -177,15 +183,16 @@ class PttScraper(BaseScraper):
             elif text == "XX":   # 噓文 <= -100
                 return -100
             elif text.startswith("X"):  # 噓文 -10 ~ -90，如 X1=−10, X9=−90
-                return -int(text[1:])
+                return -int(text[1:]) * 10
             else:                # 一般數字
                 return int(text)
         except ValueError:
-            raise ValueError(f"無法解析推文數：{text!r}")
+            logging.warning(f"無法解析推文數：{text!r}")
+            return None
     @staticmethod
     def _extract_published_at(url: str) -> Optional[datetime]:
         """從 PTT 文章 URL 的 Unix timestamp 提取發文時間"""
         match = re.search(r'M\.(\d+)\.', url)
         if match:
-            return datetime.fromtimestamp(int(match.group(1)))  # group(1) = 第一個括號內容
+            return datetime.utcfromtimestamp(int(match.group(1)))  # group(1) = 第一個括號內容
         return None
