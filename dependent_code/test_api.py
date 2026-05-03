@@ -48,13 +48,13 @@ def mock_db_with_data():
     - get_cache           → None（模擬 MISS，確保走到 DB）
     - set_cache           → no-op（不實際寫 Redis）
     - read_sql_query      → MOCK_DATA（load_articles_df 用）
-    - get_pg_readonly     → no-op（不建立真實連線）
+    - get_pg_pooled       → no-op（不建立真實連線）
     - get_daily_sentiment → MOCK_SENTIMENT_ROWS（/sentiments/* 端點用，走 data_mart 不走 cache）
     """
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg_readonly"), \
+         patch("api.get_pg_pooled"), \
          patch("api.get_daily_sentiment", return_value=list(MOCK_SENTIMENT_ROWS)):
         yield
 
@@ -63,7 +63,7 @@ def mock_db_empty():
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_EMPTY.copy()), \
-         patch("api.get_pg_readonly"), \
+         patch("api.get_pg_pooled"), \
          patch("api.get_daily_sentiment", return_value=[]):
         yield
 
@@ -141,7 +141,7 @@ def test_get_search_articles(mock_fixture, expected, request):
     assert response.status_code == 422
 
 def test_health_check():
-    with patch("api.get_pg_readonly"):
+    with patch("api.get_pg_pooled"):
         response = client.get("/health")
         assert response.status_code == 200
 
@@ -163,20 +163,20 @@ def test_set_and_get_cache():
 # /sentiments/* 系列改走 data_mart.get_daily_sentiment，不經過 cache
 def test_cache_hit():
     """
-    測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg_readonly 不被呼叫
+    測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg_pooled 不被呼叫
 
     mock 設定：
     - api.get_cache       → 回傳 MOCK_DATA（模擬 Redis 有資料）
-    - api.get_pg_readonly → 空物件（保險用，確保萬一走錯時不會真的連 DB）
+    - api.get_pg_pooled   → 空物件（保險用，確保萬一走錯時不會真的連 DB）
 
     flow:
     client.get("/articles/top_push")
     => get_top_push_articles()
     => load_articles_df()
-    => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg_readonly 不執行
+    => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg_pooled 不執行
     """
     with patch("api.get_cache", return_value=MOCK_DATA.copy()) as mock_get, \
-         patch("api.get_pg_readonly") as mock_db:
+         patch("api.get_pg_pooled") as mock_db:
         response = client.get("/articles/top_push")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查
@@ -188,7 +188,7 @@ def test_cache_miss():
     with patch("api.get_cache", return_value=None) as mock_get, \
          patch("api.set_cache") as mock_set, \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg_readonly"):
+         patch("api.get_pg_pooled"):
         response = client.get("/articles/top_push")
         assert response.status_code == 200
         mock_get.assert_called_once()   # Redis 有被查（但 MISS）
@@ -200,6 +200,6 @@ def test_cache_redis_down():
     with patch("cache_helper._redis.get", side_effect=redis.RedisError("Redis 掛了")), \
          patch("cache_helper._redis.setex", side_effect=redis.RedisError("Redis 掛了")), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
-         patch("api.get_pg_readonly"):
+         patch("api.get_pg_pooled"):
         response = client.get("/articles/top_push")
         assert response.status_code == 200  # API 正常回傳，沒有爆
