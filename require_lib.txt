@@ -1,0 +1,13 @@
+requests
+beautifulsoup4
+pandas
+jieba
+fastapi
+uvicorn
+streamlit
+matplotlib
+tqdm
+httpx
+pytest
+boto3
+python-dotenv
