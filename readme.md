@@ -14,7 +14,7 @@
 | Prometheus metrics | http://52.65.94.221:8000/metrics | ✅ live（`api_request_duration_seconds` / `articles_scraped_total` / `etl_step_duration_seconds`） |
 | Swagger quick test | `admin` / `admin123`（bcrypt hash；production 需設 `ADMIN_PW_HASH` env var 覆寫） | |
 
-> **Note**：EC2 demo 資料快照截至 2026-04-04（982,515 articles / 171,500 sentiment scores），是 frozen demo dataset。本機 PG 持續每小時 launchd ETL 補爬中（234k+ 並擴充）。`/sentiments/today` 若當日無資料會回 404 而非 500；要看歷史資料請用 `/sentiments/recent?period=30` 或 `/articles/search?keyword=AI`。
+> **Note**：EC2 demo 資料快照截至 2026-04-04（982,515 articles / 171,500 sentiment scores），是 frozen demo dataset。本機 PG 持續每小時 launchd ETL 補爬中（280k+ 並擴充）。`/sentiments/today` 若當日無資料會回 404 而非 500；要看歷史資料請用 `/sentiments/recent?period=30` 或 `/articles/search?keyword=AI`。
 
 ### 30 秒 Quick Test（curl）
 
@@ -43,7 +43,7 @@ curl -s "http://52.65.94.221:8000/metrics" | grep "api_request_duration"
 
 **解法**：建一條 end-to-end pipeline，從 7 種異質來源（中英混合、有 paywall、有反爬、有 rate-limit）每小時自動爬文 → BERT 情緒分析 → 寫進 Snowflake Schema DW → 透過 REST API 提供查詢，並用 Streamlit 視覺化「情緒 vs 隔日股價漲跌」相關性。
 
-**規模**：~178k articles、122k sentiment scores、10 年股價（0050 / VOO）、每小時自動執行、跨 macOS launchd / Docker Airflow / Kubernetes 三種部署。
+**規模**：~280k articles、122k sentiment scores、10 年股價（0050 / VOO）、每小時自動執行、跨 macOS launchd / Docker Airflow / Kubernetes 三種部署。
 
 ## Design Decisions & Trade-offs
 
