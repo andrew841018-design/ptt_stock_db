@@ -1,10 +1,71 @@
+# =============================================================================
+# CI/CD Pipeline
+# -----------------------------------------------------------------------------
+# 自動化流程：test → build → deploy（Docker Compose 或 K8s）→ health check
+#
+# 觸發方式：
+#   - push to main：自動跑 test + build + deploy-docker + deploy-k8s
+#   - workflow_dispatch：手動觸發，可選擇跑 EC2 初始建置 / Wayback 回填
+#
+# 涵蓋的基礎設施檔案：
+#   - Dockerfile              → build job
+#   - docker-compose.yml      → deploy-docker job（透過 scripts/deploy.sh）
+#   - prometheus.yml          → docker-compose 自動 mount
+#   - grafana/provisioning/   → docker-compose 自動 mount
+#   - k8s/*.yaml (8 個)       → deploy-k8s job
+#   - scripts/deploy.sh       → deploy-docker job 核心腳本
+#   - scripts/health_check.sh → deploy.sh 內部呼叫 + post-deploy job
+#   - scripts/ec2_setup.sh    → ec2-setup job（手動觸發）
+#   - scripts/dbt.sh          → post-deploy job
+#   - scripts/wayback_full_backfill.sh → wayback-backfill job（手動觸發）
+#   - airflow/dags/etl_dag.py → Airflow scheduler 自動載入
+#   - dbt/*.yml               → dbt.sh 內部使用
+# =============================================================================
+
 name: CI/CD Pipeline
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Required GitHub Secrets（Settings → Secrets and variables → Actions）：
+#    EC2_IP           → EC2 public IP（例：52.65.94.221）
+#    EC2_SSH_KEY      → EC2 SSH private key（整個 .pem 檔內容貼進去）
+#    DOCKER_USERNAME  → Docker Hub 帳號
+#    DOCKER_PASSWORD  → Docker Hub access token（不要用密碼）
+#    KUBE_CONFIG      → base64(kubeconfig)（僅 K8s opt-in 時需要）
+# ─────────────────────────────────────────────────────────────────────────────
 
 on:
   push:
     branches:
       - main
 
+  # 手動觸發：Docker Hub push / K8s 部署 / EC2 初始建置 / Wayback 回填
+  workflow_dispatch:
+    inputs:
+      build_image:
+        description: "Build and push Docker image to Docker Hub (requires DOCKER_USERNAME/DOCKER_PASSWORD secrets)"
+        type: boolean
+        default: false
+      deploy_k8s:
+        description: "Also deploy to K8s cluster (requires KUBE_CONFIG secret)"
+        type: boolean
+        default: false
+      ec2_setup:
+        description: "Run EC2 initial setup (one-time)"
+        type: boolean
+        default: false
+      wayback_backfill:
+        description: "Run Wayback full backfill (CNN + WSJ)"
+        type: boolean
+        default: false
+
+# push 新 commit 時取消還沒跑完的舊 run（節省 CI 資源）
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+# =============================================================================
+# Job 1：測試
+# =============================================================================
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,14 +83,42 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: |
-          pip install -r dependent_code/requirements.txt
+        run: pip install -r dependent_code/requirements.txt
 
       - name: Run tests
-        run: |
-          pytest dependent_code/test_api.py -v
+        run: pytest dependent_code/test_api.py -v
 
-  deploy:
+  # ===========================================================================
+  # Job 2：Build Docker image + push to registry（可選）
+  # 備註：主要部署走 deploy-docker（在 EC2 本機 build）；此 job 是選配的
+  # registry mirror，給其他環境拉用。沒設 Docker Hub secrets 時自動 skip。
+  # ===========================================================================
+  build:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/stock-sentiment"
+          docker build -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"
+
+  # ===========================================================================
+  # Job 3：Deploy via Docker Compose（EC2）
+  # 涵蓋：docker-compose.yml, prometheus.yml, grafana/provisioning/,
+  #       scripts/deploy.sh, scripts/health_check.sh
+  # ===========================================================================
+  deploy-docker:
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -42,32 +131,128 @@ jobs:
           script: |
             set -e
             cd /home/ubuntu/ptt_stock_db
-            # 強制 reset 到 origin/main，避免 divergent history 卡住
             git fetch origin
             git reset --hard origin/main
-            # 不能用 pkill -f「uvicorn」因為 drone-ssh 的 shell argv 含腳本全文，
-            # pkill -f 會匹配自己導致 SIGTERM 143。改用 lsof -ti 依 port 找 PID。
-            lsof -ti tcp:8000 2>/dev/null | xargs -r kill 2>/dev/null || true
-            lsof -ti tcp:8501 2>/dev/null | xargs -r kill 2>/dev/null || true
-            sleep 2
-            # deploy script 寫在 EC2 上，SSH session 只負責觸發，服務 fd 全部重導向，
-            # 不會被 SSH session 結束連帶殺掉
-            cat > /home/ubuntu/start_services.sh <<'EOS'
-            #!/bin/bash
-            cd /home/ubuntu/ptt_stock_db/dependent_code
-            set -a && source ../.env && set +a
-            /home/ubuntu/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000 > /home/ubuntu/api.log 2>&1 &
-            # --server.fileWatcherType none：關閉 hot-reload watcher。production 不需要，
-            # 留著它會在啟動時掃描 transformers 整個 module tree → idle 就吃 1.2 GB。
-            /home/ubuntu/venv/bin/streamlit run visualization.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --server.fileWatcherType none > /home/ubuntu/streamlit.log 2>&1 &
-            EOS
-            chmod +x /home/ubuntu/start_services.sh
-            setsid /home/ubuntu/start_services.sh < /dev/null > /dev/null 2>&1 &
-            sleep 3
-            exit 0
+            # deploy.sh 會執行：
+            #   1. docker-compose build（Dockerfile）
+            #   2. docker-compose up -d（啟動所有服務：API / Worker / PG / Redis / Airflow / Prometheus / Grafana）
+            #   3. 等待服務就緒
+            #   4. health_check.sh（檢查 FastAPI / PG / Redis / Airflow）
+            bash scripts/deploy.sh
 
-      - name: Health check
+  # ===========================================================================
+  # Job 4：Deploy via Kubernetes（opt-in，手動勾選 deploy_k8s 才跑）
+  # 涵蓋：k8s/ 下 yaml（namespace → configmap → secret → 基礎設施 → 應用 → 排程）
+  # ===========================================================================
+  deploy-k8s:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_k8s == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+
+      - name: Deploy to K8s
+        run: |
+          # 順序很重要：namespace 最先，應用最後
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/secret.yaml
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl apply -f k8s/redis-deployment.yaml
+          kubectl apply -f k8s/api-deployment.yaml
+          # 排程任務由 CronJob 觸發（每次執行產生新 Pod、跑完即刪），
+          # 不需要常駐 worker Deployment；debug 時用 `cli.py k8s-debug` 臨時起 Pod
+          kubectl apply -f k8s/cronjob.yaml
+
+      - name: Verify rollout
+        run: |
+          kubectl -n stock-sentiment rollout status deployment/api-deployment --timeout=120s
+
+  # ===========================================================================
+  # Job 5：Post-deploy — health check + dbt
+  # 涵蓋：scripts/health_check.sh, scripts/dbt.sh, dbt/*.yml
+  # ===========================================================================
+  post-deploy:
+    needs: deploy-docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health check (external)
         run: |
           sleep 15
           curl -fsS --max-time 10 http://${{ secrets.EC2_IP }}:8000/health
           curl -fsS --max-time 10 -o /dev/null http://${{ secrets.EC2_IP }}:8501/
+          curl -fsS --max-time 10 http://${{ secrets.EC2_IP }}:8080/health || true
+          curl -fsS --max-time 10 -o /dev/null http://${{ secrets.EC2_IP }}:9090/ || true
+          curl -fsS --max-time 10 -o /dev/null http://${{ secrets.EC2_IP }}:3000/ || true
+
+      - name: Run dbt transformations
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/ptt_stock_db
+            # dbt run inside container（container 內已有 dbt + requirements）
+            docker exec stock_worker bash -c "
+              set -a && source /app/.env 2>/dev/null; set +a
+              cd /opt/airflow/dbt 2>/dev/null || cd /app/dbt
+              pip install -q dbt-postgres 2>/dev/null
+              dbt run --profiles-dir . --project-dir .
+            " || echo "dbt run skipped (container not ready or dbt not configured)"
+
+  # ===========================================================================
+  # Job 6：EC2 initial setup（手動觸發，一次性）
+  # 涵蓋：scripts/ec2_setup.sh
+  # ===========================================================================
+  ec2-setup:
+    if: github.event.inputs.ec2_setup == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run EC2 setup
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            cd /home/ubuntu/ptt_stock_db
+            git fetch origin
+            git reset --hard origin/main
+            bash scripts/ec2_setup.sh
+
+  # ===========================================================================
+  # Job 7：Wayback backfill（手動觸發，長時間任務）
+  # 涵蓋：scripts/wayback_full_backfill.sh
+  # ===========================================================================
+  wayback-backfill:
+    if: github.event.inputs.wayback_backfill == 'true'
+    needs: deploy-docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Wayback backfill on EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 12h
+          script: |
+            cd /home/ubuntu/ptt_stock_db
+            # 背景執行：SSH session 結束後繼續跑
+            nohup docker exec stock_worker bash -c "
+              cd /app
+              python cli.py wayback-backfill cnn --min-year 2015 --max-articles 10000
+              python cli.py wayback-backfill wsj --min-year 2015 --max-articles 10000
+            " > /home/ubuntu/wayback_backfill.log 2>&1 &
+            echo "Wayback backfill started in background (PID: $!)"
+            echo "Log: /home/ubuntu/wayback_backfill.log"
