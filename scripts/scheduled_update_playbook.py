@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -265,6 +267,88 @@ def section_requirements(out: list) -> int:
     return 0
 
 
+_GENERAL_REVIEW_PROMPT = (
+    "對整個 repository 做完整 code review，覆蓋全部 .py / .yml / .sql 等程式碼，"
+    "找 bug / 安全 / 一致性 / 設計問題。輸出 P0-P3 分級的具體 finding 清單，含檔案+行號。"
+)
+_ADVERSARIAL_REVIEW_PROMPT = (
+    "你是 adversarial reviewer，對整個 repository 做嚴格審查，"
+    "找最容易被忽略的 edge case、安全漏洞、race condition、資料一致性陷阱、效能 hidden cost。"
+    "對 PR 持懷疑態度，輸出含檔案+行號的 finding 清單。"
+)
+
+
+def _run_codex_review(extra_prompt: Optional[str] = None, timeout: int = 180) -> tuple[str, Optional[str]]:
+    """跑一次 codex review；回傳 (stdout, error_msg or None)。
+
+    Andrew 偏好：**整 repo review**（不限縮 uncommitted diff）。
+    - extra_prompt=None → 用一般整 repo prompt
+    - extra_prompt=<str> → 用客製 prompt（如 adversarial）
+    （codex CLI `--uncommitted` 與 [PROMPT] 互斥，所以兩者都用 prompt-based、不帶 flag。）
+
+    timeout 超過 → 回傳 ("", "timeout >Ns")
+    其他例外 → 回傳 ("", "<例外類別>: <訊息>")
+    """
+    prompt = extra_prompt if extra_prompt else _GENERAL_REVIEW_PROMPT
+    cmd = ["codex", "review", prompt]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PROJECT_ROOT),
+        )
+        # codex 失敗時 stderr 可能含資訊，stdout 可能空
+        output = r.stdout if r.stdout else r.stderr
+        if r.returncode != 0 and not output.strip():
+            return "", f"non-zero exit: {r.returncode}"
+        return output, None
+    except subprocess.TimeoutExpired:
+        return "", f"timeout >{timeout}s"
+    except Exception as e:
+        return "", f"{type(e).__name__}: {e}"
+
+
+def section_codex_review(out: list) -> int:
+    """跑 codex review (一般 + adversarial) 一次蒐集 baseline issues，寫進報告。
+
+    這是「預覽」性質，不負責迭代修補；後續修補由 Claude Code 手動跑。
+    回傳警告數（codex 沒裝或 timeout 算 1 個警告）。
+    """
+    out.append("\n## 🔍 Codex Review 預覽 (一般 + adversarial)\n")
+
+    if shutil.which("codex") is None:
+        out.append("⚠️ codex CLI 未安裝，跳過 review 預覽")
+        return 1
+
+    warnings = 0
+
+    # 一般 review
+    out.append("### 一般 review\n")
+    stdout, err = _run_codex_review(extra_prompt=None, timeout=180)
+    if err:
+        out.append(f"⚠️ codex 一般 review 失敗：{err}")
+        warnings += 1
+    else:
+        out.append("```")
+        out.append(stdout.rstrip() if stdout.strip() else "(codex 無輸出)")
+        out.append("```")
+
+    # Adversarial review
+    out.append("\n### Adversarial review\n")
+    stdout, err = _run_codex_review(extra_prompt=_ADVERSARIAL_REVIEW_PROMPT, timeout=180)
+    if err:
+        out.append(f"⚠️ codex adversarial review 失敗：{err}")
+        warnings += 1
+    else:
+        out.append("```")
+        out.append(stdout.rstrip() if stdout.strip() else "(codex 無輸出)")
+        out.append("```")
+
+    return warnings
+
+
 def main() -> int:
     out: list = []
     out.append(f"# Scheduled Update Report — {_now()}\n")
@@ -274,6 +358,7 @@ def main() -> int:
     warnings += section_logs(out)
     warnings += section_etl_db(out)
     warnings += section_requirements(out)
+    warnings += section_codex_review(out)
 
     out.append("\n---\n")
     if warnings == 0:

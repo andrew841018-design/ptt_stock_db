@@ -194,9 +194,20 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Claude Code
-.claude/settings.local.json
+# Claude / Codex agent meta（cross-project 工具設定，與 PTT 無關，不進版控）
+.claude/
+.codex/
+AGENTS.md
+CORRECTIONS.md
+CLAUDE.md
+CLAUDE_archive.md
 .deps_last_checked
+
+# scheduled_update playbook 是 Claude `update` cmd 支援檔（meta 非 PTT pipeline）
+scripts/scheduled_update_playbook.py
+
+# scheduled_update playbook 自動產生的報告（每日，meta 非 PTT code）
+logs/scheduled_update_report_*.md
 
 # SQLite database files
 *.db
