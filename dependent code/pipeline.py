@@ -10,13 +10,10 @@ from analysis import clean_article_info,clean_comment_info
 logging.basicConfig(level=logging.INFO,format="%(asctime)s - %(levelname)s - %(message)s")#initialize logging
 ## global variable
 MAX_RETRY=5
-def web_scraping():
+def web_scraping(): 
     #init    
     url = "https://www.ptt.cc/bbs/stock/index.html" #初始url
     conn=sqlite3.connect("ptt_stock.db")
-    ## delte content before insert
-    ## note that need to delete comment_info first because of the foreign key constraint
-    conn.commit()
     for i in tqdm(range(900),desc="爬蟲頁數"):#爬蟲頁數
         retry = 0
         while retry < MAX_RETRY:
