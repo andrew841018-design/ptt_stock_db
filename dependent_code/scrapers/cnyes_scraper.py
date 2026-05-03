@@ -99,7 +99,7 @@ class CnyesScraper(BaseScraper):
         content = BeautifulSoup(html_content, "html.parser").get_text(separator="\n").strip()
 
         article = {
-            "title":        item.get("title"),
+            "title":        (item.get("title") or "").strip(),
             "content":      content,
             "url":          f"https://news.cnyes.com/news/id/{news_id}",
             "author":       item.get("author"),          # 記者名稱，可能為 None

@@ -10,7 +10,10 @@ from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
 from scrapers.scraper_schemas import ArticleSchema
-from config import SOURCES, SKIP_KEYWORDS, MAX_RETRY, PTT_SCRAPE_SLEEP
+from config import SOURCES, MAX_RETRY
+
+PTT_SCRAPE_SLEEP = 0.3  # 文章內頁請求間隔（避免被封鎖）
+SKIP_KEYWORDS = ["公告", "盤後閒聊", "盤中閒聊", "情報"]
 
 _SOURCE = SOURCES["ptt"]  # 只讀一次，避免 dict 到處散落
 
@@ -148,7 +151,7 @@ class PttScraper(BaseScraper):
             if not (user_id and push_tag and message):
                 continue
             comments.append({
-                "user_id":  user_id.text.strip(),
+                "author":   user_id.text.strip(),
                 "push_tag": push_tag.text.strip(),
                 "message":  message.text.strip(),
             })

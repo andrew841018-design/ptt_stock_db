@@ -7,7 +7,9 @@ import pandas as pd
 import yfinance as yf
 
 from pg_helper import get_pg
-from config import US_STOCK_MONTHS, US_STOCK_PRICES_TABLE
+from config import US_STOCK_PRICES_TABLE
+
+US_STOCK_MONTHS = 120  # 每次抓幾個月的歷史資料
 
 _TICKER = "VOO"  # 固定追蹤單一標的
 

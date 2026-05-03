@@ -3,7 +3,14 @@ import logging
 import subprocess
 import os
 from datetime import datetime
-from config import PG_CONFIG, S3_BUCKET, DOCKER_PATH, DB_CONTAINER
+from dotenv import load_dotenv
+
+_base = os.path.dirname(__file__)
+load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
+
+S3_BUCKET    = "ptt-sentiment-backup"
+DOCKER_PATH  = "/usr/local/bin/docker"
+DB_CONTAINER = "ptt_stock_db"
 
 
 s3 = boto3.client('s3')
@@ -15,16 +22,22 @@ def backup_database():
     dump_path = f'/tmp/backup_{timestamp}.sql'
 
     try:
+        pg_host     = os.environ.get("PG_HOST",     "localhost")
+        pg_port     = os.environ.get("PG_PORT",     "5432")
+        pg_user     = os.environ.get("PG_USER",     "postgres")
+        pg_password = os.environ.get("PG_PASSWORD",  "")
+        pg_dbname   = os.environ.get("PG_DBNAME",   "stock_analysis_db")
+
         with open(dump_path, 'w') as f:
             subprocess.run([
                 DOCKER_PATH, 'exec',
-                '-e', f'PGPASSWORD={PG_CONFIG["password"]}',
+                '-e', f'PGPASSWORD={pg_password}',
                 DB_CONTAINER,
                 'pg_dump',
-                '-h', PG_CONFIG['host'],
-                '-p', str(PG_CONFIG['port']),
-                '-U', PG_CONFIG['user'],
-                '-d', PG_CONFIG['dbname'],
+                '-h', pg_host,
+                '-p', pg_port,
+                '-U', pg_user,
+                '-d', pg_dbname,
             ], stdout=f, check=True)
         s3.upload_file(dump_path, S3_BUCKET, s3_key)
         logging.info(f'Backup completed and uploaded to {s3_key}')

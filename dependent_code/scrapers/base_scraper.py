@@ -7,6 +7,13 @@ import requests
 from pg_helper import get_pg
 from config import ARTICLES_TABLE, COMMENTS_TABLE, SOURCES_TABLE, MAX_RETRY
 
+# MongoDB 原始回應存檔（降級設計：MongoDB 掛掉不影響爬蟲）
+try:
+    from mongo_helper import save_raw_response
+    _MONGO_OK = True
+except ImportError:
+    _MONGO_OK = False
+
 
 def get_with_retry(url: str, **kwargs) -> requests.Response:
     """
@@ -21,7 +28,7 @@ def get_with_retry(url: str, **kwargs) -> requests.Response:
             return response
         except requests.RequestException as e:
             if attempt == MAX_RETRY - 1:
-                raise e
+                raise e  # 刻意用 raise e（非 bare raise），review 請勿改動
             wait = 2 ** attempt
             logging.warning(f"請求失敗（{attempt + 1}/{MAX_RETRY}），{wait}s 後重試：{e}")
             time.sleep(wait)
@@ -59,8 +66,27 @@ class BaseScraper(ABC):
         """只定義抽象類別，實作由子類別實現"""
 
     def _get_with_retry(self, url: str, **kwargs) -> requests.Response:
-        """HTTP GET with retry，委派給 module-level get_with_retry()"""
-        return get_with_retry(url, **kwargs) #因為tw_stock_fetcher需要使用，但不繼承父類別，因此這樣寫
+        """HTTP GET with retry + 原始回應存檔到 MongoDB"""
+        response = get_with_retry(url, **kwargs) #因為tw_stock_fetcher需要使用，但不繼承父類別，因此這樣寫
+        self._store_raw(url, response)
+        return response
+
+    def _store_raw(self, url: str, response: requests.Response) -> None:
+        """
+        將 HTTP 原始回應存入 MongoDB raw_responses。
+        依 Content-Type 自動判斷存 raw_html 或 raw_json。
+        MongoDB 掛掉時靜默跳過，不影響爬蟲。
+        """
+        if not _MONGO_OK:
+            return
+        content_type = response.headers.get("Content-Type", "")
+        source_key   = self.get_source_info().get("name", "unknown")
+        if "json" in content_type:
+            save_raw_response(source_key, url, response.text,
+                      content_type="json", http_status=response.status_code)
+        else:
+            save_raw_response(source_key, url, response.text,
+                      content_type="html", http_status=response.status_code)
 
     def run(self) -> None:
         """主流程：fetch → 寫入 DB"""
@@ -105,7 +131,8 @@ class BaseScraper(ABC):
         if row:
             return row[0]
         cursor.execute(
-            f"INSERT INTO {SOURCES_TABLE} (source_name, url) VALUES (%s, %s) RETURNING source_id",
+            f"INSERT INTO {SOURCES_TABLE} (source_name, url) VALUES (%s, %s)"
+            f" ON CONFLICT (url) DO NOTHING RETURNING source_id",
             (name, url)
         )
         return cursor.fetchone()[0]
@@ -137,6 +164,6 @@ class BaseScraper(ABC):
     def _insert_comments(self, cursor, article_id: int, comments: list) -> None:
         for comment in comments:
             cursor.execute(f"""
-                INSERT INTO {COMMENTS_TABLE} (article_id, user_id, push_tag, message)
+                INSERT INTO {COMMENTS_TABLE} (article_id, author, push_tag, message)
                 VALUES (%s, %s, %s, %s)
-            """, (article_id, comment['user_id'], comment['push_tag'], comment['message']))
+            """, (article_id, comment['author'], comment['push_tag'], comment['message']))

@@ -43,7 +43,10 @@ from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
 from scrapers.scraper_schemas import ArticleSchema
-from config import SOURCES, REDDIT_BATCH_SLEEP_INTERVAL, REDDIT_BATCH_HISTORY_START, MAX_RETRY
+from config import SOURCES, MAX_RETRY
+
+REDDIT_BATCH_SLEEP_INTERVAL = 0.3          # 建議每秒不超過 5 次請求（0.2s per request）
+REDDIT_BATCH_HISTORY_START  = "2005-01-01" # Reddit 創立年份，批量歷史抓取的起點
 
 _SOURCE     = SOURCES["reddit"]
 _API_URL    = "https://arctic-shift.photon-reddit.com/api/posts/search"
