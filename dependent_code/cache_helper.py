@@ -25,7 +25,7 @@ def get_cache(key: str) -> Optional[pd.DataFrame]:
 
 
 def set_cache(key: str, df: pd.DataFrame) -> None:
-    """將 DataFrame 存入 Redis，TTL={REDIS_TTL}s"""
+    """將 DataFrame 存入 Redis，TTL 由 config.REDIS_TTL 控制"""
     try:
         _redis.setex(key, REDIS_TTL, df.to_json(orient='table'))
     except redis.RedisError as e:
