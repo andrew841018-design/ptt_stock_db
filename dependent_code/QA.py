@@ -58,7 +58,7 @@ def QA_checks():
                 raise ValueError(f"QA FAILED：孤兒推文 {orphan_count} 筆")
             logging.info("QA PASSED：無孤兒推文")
 
-            for col in ("user_id", "push_tag", "message"):
+            for col in ("author", "push_tag", "message"):
                 cursor.execute(f"SELECT COUNT(*) FROM {COMMENTS_TABLE} WHERE {col} IS NULL")
                 null_count = cursor.fetchone()[0]
                 if null_count > 0:
