@@ -69,6 +69,17 @@ class SentimentDataset(Dataset):
 
 # ─── 資料載入 ──────────────────────────────────────────────────────────────────
 
+def should_finetune() -> bool:
+    """True 若 article_labels >= MIN_SAMPLES 且 fine-tuned 模型目錄不存在（避免重複訓練）"""
+    if os.path.isdir(MODEL_DIR):
+        return False
+    with get_pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {ARTICLE_LABELS_TABLE}")
+            count = cur.fetchone()[0]
+    return count >= MIN_SAMPLES
+
+
 def load_labeled_data() -> tuple[list[str], list[int]]:
     """從 article_labels JOIN articles 載入標注資料，回傳 (texts, labels)"""
     with get_pg() as conn:
@@ -216,8 +227,7 @@ def evaluate() -> None:
     preds_str  = [ID_TO_LABEL[pred_id] for pred_id in preds]
     target_names = ["negative", "neutral", "positive"]
 
-    print("\n" + "=" * 50)
-    print(classification_report(labels_str, preds_str, target_names=target_names))
+    logging.info("[BERT] Classification Report:\n%s", classification_report(labels_str, preds_str, target_names=target_names))
     macro_f1 = f1_score(y_te, preds, average="macro")
     logging.info("[BERT] Macro F1-score: %.4f", macro_f1)
 

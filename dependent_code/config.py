@@ -4,21 +4,18 @@ from dotenv import load_dotenv
 _base = os.path.dirname(__file__)
 load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..', '.env'))
 
-# PostgreSQL connection (admin role: create tables / create roles)
-PG_CONFIG = {
-    "host":     os.environ.get("PG_HOST",     "localhost"),
-    "port":     int(os.environ.get("PG_PORT",  "5432")),
-    "dbname":   os.environ.get("PG_DBNAME",   "stock_analysis_db"),
-    "user":     os.environ.get("PG_USER",     "postgres"),
-    "password": os.environ.get("PG_PASSWORD", ""),
+_PG_BASE = {
+    "host":   os.environ.get("PG_HOST",   "localhost"),
+    "port":   int(os.environ.get("PG_PORT", "5432")),
+    "dbname": os.environ.get("PG_DBNAME", "ptt_stock"),
 }
 
-# PostgreSQL API read-only role (FastAPI, SELECT only)
-PG_API_CONFIG = {
-    **PG_CONFIG,
-    "user":     os.environ.get("PG_API_USER",     "api_user"),
-    "password": os.environ.get("PG_API_PASSWORD", ""),
-}
+# DDL 操作（schema.py / dw_schema.py）
+PG_ADMIN_CONFIG = {**_PG_BASE, "user": os.environ.get("PG_ADMIN_USER", "postgres"),  "password": os.environ.get("PG_ADMIN_PASSWORD", "")}
+# ETL 讀寫（pipeline / get_pg()）
+PG_CONFIG       = {**_PG_BASE, "user": os.environ.get("PG_USER",       "etl_user"),  "password": os.environ.get("PG_PASSWORD",       "etl_write_2026")}
+# API 唯讀（FastAPI）
+PG_API_CONFIG   = {**_PG_BASE, "user": os.environ.get("PG_API_USER",   "api_user"),  "password": os.environ.get("PG_API_PASSWORD",   "")}
 
 # JWT authentication
 JWT_SECRET_KEY     = os.environ.get("JWT_SECRET_KEY",     "change-me-in-production")
@@ -129,11 +126,14 @@ def sources_by_lang(lang: str) -> list:
     """回傳指定語言的來源 name list。e.g. sources_by_lang("en") → ["reddit", "cnn", ...]"""
     return [v["name"] for v in SOURCES.values() if v["lang"] == lang]
 
-# dw_etl.py / stock_matcher.py 用：來源 → 市場 & 追蹤標的
+# dw_etl.py / ai_model_prediction.py 用：來源 → 市場 & 追蹤標的
 SOURCE_META = {
     key: {"market": src["market"], "stock": src["stock"]}
     for key, src in SOURCES.items()
 }
+# Wayback backfill scrapers are not in SOURCES (not active crawlers) but insert into sources table
+SOURCE_META["wayback_cnn"] = {"market": "US", "stock": "VOO"}
+SOURCE_META["wayback_wsj"] = {"market": "US", "stock": "VOO"}
 
 # plt_function.py 用：來源 → 圖表配色
 SOURCE_COLORS = {v["name"]: v.get("color") for v in SOURCES.values() if v.get("color")}

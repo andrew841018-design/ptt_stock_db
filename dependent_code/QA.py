@@ -53,8 +53,10 @@ def QA_checks():
 
             # ── comments ──────────────────────────────────────────────────
             cursor.execute(f"""
-                SELECT COUNT(*) FROM {COMMENTS_TABLE}
-                WHERE article_id NOT IN (SELECT article_id FROM {ARTICLES_TABLE})
+                SELECT COUNT(*) FROM {COMMENTS_TABLE} c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {ARTICLES_TABLE} a WHERE a.article_id = c.article_id
+                )
             """)
             orphan_count = cursor.fetchone()[0]
             if orphan_count > 0:
@@ -70,8 +72,10 @@ def QA_checks():
 
             # ── sentiment_scores ──────────────────────────────────────────
             cursor.execute(f"""
-                SELECT COUNT(*) FROM {SENTIMENT_SCORES_TABLE}
-                WHERE article_id NOT IN (SELECT article_id FROM {ARTICLES_TABLE})
+                SELECT COUNT(*) FROM {SENTIMENT_SCORES_TABLE} ss
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {ARTICLES_TABLE} a WHERE a.article_id = ss.article_id
+                )
             """)
             orphan_scores = cursor.fetchone()[0]
             if orphan_scores > 0:

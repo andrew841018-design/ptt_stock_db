@@ -25,62 +25,6 @@ def plot_sentiment_trend(df: pd.DataFrame) -> plt.Figure:
     ax.set_xlabel('Date')
     ax.set_ylabel('Average Article Sentiment Score')
     return fig
-def plot_push_count_distribution(df: pd.DataFrame) -> plt.Figure:
-    """
-    各推文數區間的「正向文章比例」橫條圖。
-
-    設計演進（越改越簡單）：
-    - v1 scatter：171k 點糊成色塊
-    - v2 box plot：需要統計素養（看 median/IQR）
-    - v3 100% stacked bar：三色並列仍要比對
-    - v4（此版）一個桶子 = 一個數字「這區間有幾 % 文章是正向的」
-      非技術背景的人一眼就能回答「哪種推文數的文章最正向」。
-      長條越長越正向、紅色 < 50% / 綠色 ≥ 50%。
-    """
-    df = df.dropna(subset=['Push_count', 'Article_Sentiment_Score']).copy()
-    fig, ax = plt.subplots()
-    if df.empty:
-        ax.text(0.5, 0.5, '無資料', ha='center', va='center', transform=ax.transAxes)
-        return fig
-
-    push_bins   = [-101, -1, 0, 10, 50, 101]
-    push_labels = ['噓文 (<0)', '冷門 (0 推)', '低推 (1-9 推)', '中推 (10-49 推)', '高推 (≥50 推)']
-    df['push_bucket'] = pd.cut(df['Push_count'], bins=push_bins,
-                               labels=push_labels, include_lowest=True)
-    # 正向 = 情緒分數 > 0.05（跟 VADER 慣例一致）
-    df['is_positive'] = df['Article_Sentiment_Score'] > 0.05
-
-    pos_ratio = df.groupby('push_bucket', observed=True)['is_positive'].mean() * 100
-    pos_ratio = pos_ratio.reindex(push_labels)
-    counts    = df['push_bucket'].value_counts().reindex(push_labels)
-
-    # 單一 threshold 配色：≥50% 綠、<50% 紅，方便「及格 / 不及格」直覺判讀
-    colors = ['#5cb85c' if p >= 50 else '#d9534f' for p in pos_ratio.values]
-
-    y = range(len(push_labels))
-    ax.barh(y, pos_ratio.values, color=colors, edgecolor='white', height=0.65)
-
-    # 每條右邊寫大大的百分比
-    for i, val in enumerate(pos_ratio.values):
-        ax.text(val + 1, i, f'{val:.0f}%', va='center',
-                fontsize=16, fontweight='bold')
-
-    # y 軸：推文桶 + 樣本數註記
-    ylabels = [f'{lbl}\n({cnt:,} 篇)' for lbl, cnt in zip(push_labels, counts)]
-    ax.set_yticks(list(y))
-    ax.set_yticklabels(ylabels)
-    ax.invert_yaxis()                          # 噓文在上、高推在下（由冷到熱）
-    ax.set_xlim(0, 100)
-    ax.set_xlabel('正向文章比例 (%)')
-    ax.set_title('哪種推文數的文章最「正向」？')
-
-    # 50% 基準線：一眼看出哪些桶及格
-    ax.axvline(x=50, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    fig.tight_layout()
-    return fig
 def plot_daily_article_count(df: pd.DataFrame) -> plt.Figure:
     """group by date and count the number of articles"""
     fig,ax=plt.subplots()
@@ -137,26 +81,45 @@ def plot_sentiment_and_price_trend(df: pd.DataFrame, stock_name: str, market_lab
     return fig
 
 
-def plot_sentiment_by_source(df: pd.DataFrame) -> plt.Figure:
+def plot_sentiment_avg_by_source_bar(df: pd.DataFrame) -> plt.Figure:
     """
-    各來源每日平均情緒折線圖（同一張圖多條線）。
-    df 需包含欄位：Date、Article_Sentiment_Score、Source
+    各來源「整段期間平均情緒」橫條圖。
+    一眼回答：哪個來源最樂觀 / 最悲觀？
+    紅色 < 0 / 綠色 ≥ 0；按平均情緒從正到負排序（高在上）。
     """
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 4.5))
 
-    # 來源配色：從 config.SOURCE_COLORS 衍生，新增來源不需改這裡
-    from config import SOURCE_COLORS
-    _COLORS = SOURCE_COLORS
+    avg = (
+        df.groupby('Source')['Article_Sentiment_Score']
+        .agg(['mean', 'count'])
+        .sort_values('mean', ascending=True)  # ascending 配合 barh 顯示時自然由上到下從正到負
+    )
 
-    for source_name, group in df.groupby('Source'):
-        daily = group.groupby('Date')['Article_Sentiment_Score'].mean()
-        color = _COLORS.get(source_name, None)
-        ax.plot(daily.index, daily.values, label=source_name, color=color, alpha=0.8)
+    if avg.empty:
+        ax.text(0.5, 0.5, '無資料', ha='center', va='center', transform=ax.transAxes)
+        return fig
 
-    ax.legend(loc='upper left', fontsize=10)
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Average Sentiment Score')
-    ax.set_title('Sentiment Trend by Source')
-    fig.autofmt_xdate()
+    colors = ['#5cb85c' if v >= 0 else '#d9534f' for v in avg['mean'].values]
+    y = range(len(avg))
+    ax.barh(y, avg['mean'].values, color=colors, edgecolor='white', height=0.65)
+
+    # 每條右邊標數字
+    for i, (val, cnt) in enumerate(zip(avg['mean'].values, avg['count'].values)):
+        offset = 0.01 if val >= 0 else -0.01
+        ha = 'left' if val >= 0 else 'right'
+        ax.text(val + offset, i, f'{val:+.2f}', va='center', ha=ha,
+                fontsize=11, fontweight='bold')
+
+    # y 軸：來源 + 樣本數
+    ylabels = [f'{src}\n({cnt:,} 篇)' for src, cnt in zip(avg.index, avg['count'].values)]
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(ylabels, fontsize=9)
+    ax.set_xlim(-1, 1)
+    ax.axvline(x=0, color='gray', linestyle='-', linewidth=0.8, alpha=0.6)
+    ax.set_xlabel('Average Sentiment Score')
+    ax.set_title('當期平均情緒（哪個來源最樂觀 / 最悲觀？）')
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     fig.tight_layout()
     return fig

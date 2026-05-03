@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import (
     ARTICLES_TABLE,
     SENTIMENT_SCORES_TABLE,
+    SOURCES_TABLE,
     STOCK_PRICES_TABLE,
     US_STOCK_PRICES_TABLE,
     AI_MODEL_PREDICTION_RUNS_TABLE,
@@ -72,7 +73,7 @@ def fetch_sentiment(sources: list[str]) -> pd.DataFrame:
                     COUNT(a.article_id)           AS article_count,
                     AVG(COALESCE(a.push_count,0)) AS avg_push_count
                 FROM {ARTICLES_TABLE} a
-                JOIN sources s           ON s.source_id  = a.source_id
+                JOIN {SOURCES_TABLE} s    ON s.source_id  = a.source_id
                 LEFT JOIN {SENTIMENT_SCORES_TABLE} ss ON ss.article_id = a.article_id
                 WHERE s.source_name = ANY(%s)
                 GROUP BY a.published_at::date
@@ -190,7 +191,7 @@ def walk_forward(df: pd.DataFrame) -> pd.DataFrame:
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
 
-        step_df = test_df[["date", "next_return"]].copy()
+        step_df = test_df[["date", "close", "next_return"]].copy()
         step_df["true"] = y_test.values
         step_df["pred"] = y_pred
         results.append(step_df)
@@ -226,7 +227,9 @@ def enrich_and_log(result_df: pd.DataFrame, display_name: str) -> pd.DataFrame:
     result_df = result_df.copy()
     result_df["strategy_daily_return"]      = result_df["next_return"] * (result_df["pred"] == 1)
     result_df["strategy_cumulative_return"] = (1 + result_df["strategy_daily_return"]).cumprod()
-    result_df["buy_and_hold_return"]        = (1 + result_df["next_return"]).cumprod()
+    # buy-and-hold: 用實際收盤價除以第一日收盤價，避免 cumprod 因 sentiment 缺口跳過中間交易日
+    first_close = result_df["close"].iloc[0]
+    result_df["buy_and_hold_return"]        = result_df["close"] / first_close
 
     final_strategy     = result_df["strategy_cumulative_return"].iloc[-1]
     final_buy_and_hold = result_df["buy_and_hold_return"].iloc[-1]

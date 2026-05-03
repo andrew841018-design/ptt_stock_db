@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from typing import Optional
 import streamlit as st
 from pg_helper import get_pg
-from config import ARTICLES_TABLE, ARTICLE_LABELS_TABLE
+from config import ARTICLES_TABLE, ARTICLE_LABELS_TABLE, sources_by_lang
 
 # ── 常數 ──────────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,6 @@ LABEL_DISPLAY  = {"positive": "✅ 正面", "neutral": "⚪ 中性", "negative":
 LABEL_COLORS   = {"positive": "green",   "neutral": "gray",   "negative": "red"}
 
 # 中文來源（對比 0050）、英文來源（對比 VOO）
-from config import sources_by_lang
 ZH_SOURCES = sources_by_lang("zh")
 EN_SOURCES = sources_by_lang("en")
 
@@ -54,7 +53,7 @@ def _load_next_article(lang: str) -> Optional[dict]:
                 FROM {ARTICLES_TABLE} a
                 JOIN sources s ON s.source_id = a.source_id
                 WHERE s.source_name = ANY(%s)
-                  AND a.article_id NOT IN (SELECT article_id FROM {ARTICLE_LABELS_TABLE})
+                  AND NOT EXISTS (SELECT 1 FROM {ARTICLE_LABELS_TABLE} al WHERE al.article_id = a.article_id)
                   AND a.title != ''
                 ORDER BY RANDOM()
                 LIMIT 1
@@ -88,9 +87,11 @@ def _save_label(article_id: int, label: str) -> None:
 st.set_page_config(page_title="情緒標注工具", layout="wide")
 st.title("📝 文章情緒標注工具")
 
-# 語言切換
+# 語言切換（顯示動態取自 SOURCES，避免新增來源後 label 不同步）
+_zh_label = "、".join(ZH_SOURCES) or "（無）"
+_en_label = "、".join(EN_SOURCES) or "（無）"
 lang = st.sidebar.radio("標注語言", ["zh", "en"],
-                         format_func=lambda x: "🇹🇼 中文（PTT + 鉅亨）" if x == "zh" else "🇺🇸 英文（Reddit）")
+                         format_func=lambda x: f"🇹🇼 中文（{_zh_label}）" if x == "zh" else f"🇺🇸 英文（{_en_label}）")
 compare_stock = "0050（元大台灣50）" if lang == "zh" else "VOO（Vanguard S&P 500）"
 st.sidebar.markdown(f"**對比標的**：{compare_stock}")
 
