@@ -20,40 +20,51 @@ CREATE TABLE IF NOT EXISTS sources (
 CREATE TABLE IF NOT EXISTS articles (
     article_id   SERIAL PRIMARY KEY,
     source_id    INTEGER      NOT NULL REFERENCES sources(source_id),
-    title        TEXT,
-    push_count   INTEGER      DEFAULT 0,
+    title        TEXT         NOT NULL,
+    push_count   INTEGER,
     author       VARCHAR(100),
-    url          TEXT         UNIQUE,
-    content      TEXT,
-    published_at TIMESTAMP,
+    url          TEXT         NOT NULL UNIQUE,
+    content      TEXT         NOT NULL,
+    published_at TIMESTAMP    NOT NULL,
     scraped_at   TIMESTAMP    DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS comments (
     comment_id SERIAL PRIMARY KEY,
     article_id INTEGER      NOT NULL REFERENCES articles(article_id),
-    user_id    VARCHAR(100),
-    push_tag   VARCHAR(10),
-    message    TEXT
+    user_id    VARCHAR(100) NOT NULL,
+    push_tag   VARCHAR(10)  NOT NULL,
+    message    TEXT         NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sentiment_scores (
     score_id      SERIAL PRIMARY KEY,
-    target_type   VARCHAR(10) NOT NULL CHECK (target_type IN ('article', 'comment')),
-    target_id     INTEGER     NOT NULL,
-    method        VARCHAR(50) NOT NULL,
-    score         REAL        NOT NULL,
-    calculated_at TIMESTAMP   DEFAULT NOW(),
-    UNIQUE (target_type, target_id, method)
+    article_id    INTEGER NOT NULL REFERENCES articles(article_id),
+    score         REAL    NOT NULL,
+    calculated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (article_id)
+);
+"""
+
+CREATE_STOCK_PRICES = """
+CREATE TABLE IF NOT EXISTS stock_prices (
+    price_id   SERIAL  PRIMARY KEY,
+    trade_date DATE         NOT NULL UNIQUE,
+    open       NUMERIC(10,2),
+    high       NUMERIC(10,2),
+    low        NUMERIC(10,2),
+    close      NUMERIC(10,2),
+    change     NUMERIC(10,2)
 );
 """
 
 # ─── DDL：建 Index ─────────────────────────────────────────────────────────────
 CREATE_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
-CREATE INDEX IF NOT EXISTS idx_articles_source_id    ON articles(source_id);
-CREATE INDEX IF NOT EXISTS idx_comments_article_id   ON comments(article_id);
-CREATE INDEX IF NOT EXISTS idx_sentiment_target      ON sentiment_scores(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_articles_published_at  ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_articles_source_id     ON articles(source_id);
+CREATE INDEX IF NOT EXISTS idx_comments_article_id    ON comments(article_id);
+CREATE INDEX IF NOT EXISTS idx_sentiment_article_id   ON sentiment_scores(article_id);
+CREATE INDEX IF NOT EXISTS idx_stock_prices_trade_date ON stock_prices(trade_date);
 """
 
 
@@ -65,6 +76,8 @@ def create_schema() -> None:
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLES)
             logging.info("Tables created (or already exist)")
+            cur.execute(CREATE_STOCK_PRICES)
+            logging.info("stock_prices table created (or already exists)")
             cur.execute(CREATE_INDEXES)
             logging.info("Indexes created (or already exist)")
         conn.commit()
