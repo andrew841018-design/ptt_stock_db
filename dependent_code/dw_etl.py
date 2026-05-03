@@ -9,7 +9,6 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
   5. refresh_all()             - 刷新 Data Mart（mart_daily_summary / mart_hot_stocks）
   6. refresh_mv()              - 刷新 Materialized View（mv_market_summary，市場層級聚合）
 
-執行方式：python dw_etl.py
 支援增量：每次只處理自上次 ETL 以來有新文章的日期（不全量重算）
 """
 

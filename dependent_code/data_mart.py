@@ -18,10 +18,6 @@ Data Mart = DW 的子集，針對特定用途預先彙整：
   兩者互補：MV 跑市場層級聚合（Snowflake 三表 JOIN），Mart 跑 source 層級細粒度。
   MV 定義在 dw_schema.py，由 dw_etl.refresh_mv() 呼叫 REFRESH 更新。
 
-執行方式：
-  python data_mart.py          # 刷新兩個 Data Mart
-  python data_mart.py summary  # 只刷新 mart_daily_summary
-  python data_mart.py hot      # 只刷新 mart_hot_stocks
 """
 
 import logging

@@ -9,7 +9,6 @@
   - 來源：Wikipedia List of S&P 500 companies
   - VOO 追蹤 S&P 500，故成分股與 S&P 500 相同
 
-執行方式：python fetch_etf_holdings.py
 """
 
 import json

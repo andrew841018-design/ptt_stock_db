@@ -21,9 +21,6 @@ Reddit 歷史批量資料載入器。
   - 每頁 100 筆，cursor 分頁（after timestamp）
   - 不支援 r/a+b+c 合併語法，需逐一查詢各 subreddit
 
-執行方式：
-  python3 -m scrapers.reddit_batch_loader                        # 預設：抓 Reddit 全歷史（2005～今）
-  python3 -m scrapers.reddit_batch_loader 2022-01-01 2023-12-31  # 指定日期範圍
 """
 
 import sys
@@ -207,15 +204,3 @@ class RedditBatchLoader(BaseScraper):
 
 
 
-if __name__ == "__main__":
-    # sys.argv[0] = 腳本名稱，argv[1] = after 日期，argv[2] = before 日期
-    if len(sys.argv) == 3:
-        after_dt  = datetime.strptime(sys.argv[1], "%Y-%m-%d")
-        before_dt = datetime.strptime(sys.argv[2], "%Y-%m-%d")
-    else:
-        # 預設：從 config.REDDIT_BATCH_HISTORY_START 至今
-        before_dt = datetime.utcnow()
-        after_dt  = datetime.strptime(REDDIT_BATCH_HISTORY_START, "%Y-%m-%d")
-        logging.info(f"未指定日期，預設抓取 Reddit 全歷史：{after_dt.date()} ～ {before_dt.date()}")
-
-    RedditBatchLoader().run_range(after_dt, before_dt)
