@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from typing import Optional
 import streamlit as st
 from pg_helper import get_pg
-from config import ARTICLES_TABLE, SOURCES, ARTICLE_LABELS_TABLE
+from config import ARTICLES_TABLE, ARTICLE_LABELS_TABLE
 
 # ── 常數 ──────────────────────────────────────────────────────────────────────
 

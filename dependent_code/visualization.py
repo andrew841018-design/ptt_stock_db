@@ -3,18 +3,25 @@ import pandas as pd
 import datetime
 from typing import Optional
 from pg_helper import get_pg
-from plt_function import plot_sentiment_trend, plot_push_count_distribution, plot_daily_article_count, plot_sentiment_vs_stock, plot_sentiment_and_price_trend
-from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE
+from plt_function import (
+    plot_sentiment_trend, plot_push_count_distribution,
+    plot_daily_article_count, plot_sentiment_vs_stock,
+    plot_sentiment_and_price_trend, plot_sentiment_by_source,
+)
+from config import (
+    ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, SOURCES_TABLE,
+    STOCK_PRICES_TABLE, US_STOCK_PRICES_TABLE,
+    sources_by_market,
+)
 
-TWSE_STOCK_NAME = "元大台灣50"  # 圖表標題用
+TW_STOCK_NAME = "0050 元大台灣50"
+US_STOCK_NAME = "VOO Vanguard S&P 500 ETF"
 
 
 @st.cache_data
 def load_data():
-    # JOIN articles + sentiment_scores，用 alias 對齊原本欄位名稱。
-    # INNER JOIN 天然過濾成「有情緒分數」的文章（~171k 筆 / ~170 MB），
-    # 在 t3.small 2 GB RAM + 2 GB swap 上可負擔。Streamlit 會透過
-    # @st.cache_data 快取整個 DataFrame，後續 request 直接 hit cache。
+    # JOIN articles + sentiment_scores + sources，取 source_name 供來源篩選
+    # INNER JOIN 天然過濾成「有情緒分數」的文章
     with get_pg() as conn:
         df = pd.read_sql_query(f"""
             SELECT
@@ -22,59 +29,81 @@ def load_data():
                 a.push_count     AS "Push_count",
                 a.published_at   AS "Date",
                 a.url            AS "Url",
-                s.score          AS "Article_Sentiment_Score"
+                s.score          AS "Article_Sentiment_Score",
+                src.source_name  AS "Source"
             FROM {ARTICLES_TABLE} a
             JOIN {SENTIMENT_SCORES_TABLE} s
                 ON s.article_id = a.article_id
+            JOIN {SOURCES_TABLE} src
+                ON src.source_id = a.source_id
         """, conn)
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
 
-st.set_page_config(page_title="Ptt Stock Sentiment Analysis", page_icon=":chart_with_upwards_trend:", layout="wide")
-st.title("Ptt Stock Sentiment Analysis")
+st.set_page_config(
+    page_title="Stock Sentiment Analysis",
+    page_icon=":chart_with_upwards_trend:",
+    layout="wide",
+)
+st.title("Stock Sentiment Analysis Dashboard")
 df = load_data()
-st.write(f"資料期間:{df['Date'].min()} ~ {df['Date'].max()}")
+st.write(f"資料期間: {df['Date'].min()} ~ {df['Date'].max()}　｜　共 {len(df):,} 篇文章")
 
-# 日期篩選
+# ─── 側邊欄篩選 ─────────────────────────────────────────────────────────────
 st.sidebar.subheader("Date Selection")
-# Streamlit date_input 預設把可選範圍限制在 default ± 10 年，
-# 會讓使用者選不到 2018 之後（因為 start default = 2008）。
-# 明確傳 min_value / max_value 涵蓋整個資料範圍。
 _min_date = df['Date'].min()
 _max_date = df['Date'].max()
 start_date = st.sidebar.date_input("Start Date", _min_date, min_value=_min_date, max_value=_max_date)
 end_date   = st.sidebar.date_input("End Date",   _max_date, min_value=_min_date, max_value=_max_date)
-mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)        # record all the dates in the selected date range
+
+# 來源篩選（多選）
+all_sources = sorted(df['Source'].unique().tolist())
+st.sidebar.subheader("Source Filter")
+selected_sources = st.sidebar.multiselect("選擇來源", all_sources, default=all_sources)
+
+mask = (
+    (df['Date'] >= start_date) &
+    (df['Date'] <= end_date) &
+    (df['Source'].isin(selected_sources))
+)
 if mask.sum() == 0:
-    st.warning("No data available for the selected date range")
-    st.stop()  # stop the app
+    st.warning("No data available for the selected filters")
+    st.stop()
 else:
-    df = df[mask]  # filter the data by the selected date range
+    df = df[mask]
 
-fig_sentiment_trend = plot_sentiment_trend(df)
-st.subheader("Sentiment Trend")
-st.pyplot(fig_sentiment_trend)
-
-fig_push_count_distribution = plot_push_count_distribution(df)
-st.subheader("Push Count Distribution")
-st.pyplot(fig_push_count_distribution)
-
-st.subheader("Daily Article Count")
-fig_daily_article_count = plot_daily_article_count(df)
-st.pyplot(fig_daily_article_count)
-
-# show today's sentiment score
+# ─── 今日情緒指標 ─────────────────────────────────────────────────────────────
 today     = df[df['Date'] == df['Date'].max()]
 score     = round(today['Article_Sentiment_Score'].mean(), 2)
 yesterday = df[df['Date'] == df['Date'].max() - datetime.timedelta(days=1)]
 change_score = round(score - yesterday['Article_Sentiment_Score'].mean(), 2) if not yesterday.empty else 0
 st.metric(label="Today's Sentiment Score", value=score, delta=change_score)
 
-st.subheader("Today's Top 10 Trending Articles")  # 顯示今日前10名熱門文章
-st.dataframe(df.nlargest(10, 'Push_count')[['Title', 'Push_count', 'Article_Sentiment_Score', 'Date']])
+# ─── Sentiment Trend（全來源合併）─────────────────────────────────────────────
+st.subheader("Sentiment Trend")
+st.pyplot(plot_sentiment_trend(df))
 
-# 關鍵字統計 TOP20（TF-IDF 版）
+# ─── Sentiment by Source（各來源分開畫線）──────────────────────────────────────
+if len(df['Source'].unique()) > 1:
+    st.subheader("Sentiment by Source")
+    st.pyplot(plot_sentiment_by_source(df))
+
+# ─── Daily Article Count ─────────────────────────────────────────────────────
+st.subheader("Daily Article Count")
+st.pyplot(plot_daily_article_count(df))
+
+# ─── Push Count Distribution ─────────────────────────────────────────────────
+st.subheader("Push Count Distribution")
+st.pyplot(plot_push_count_distribution(df))
+
+# ─── Top Articles by Engagement ──────────────────────────────────────────────
+st.subheader("Top Articles by Engagement")
+# 含來源欄位，所有來源的文章都會顯示
+top_cols = ['Title', 'Source', 'Push_count', 'Article_Sentiment_Score', 'Date']
+st.dataframe(df.nlargest(20, 'Push_count')[top_cols])
+
+# ─── 關鍵字統計 TOP20（TF-IDF 版）───────────────────────────────────────────
 #
 # 為什麼不用 KeyBERT：
 # - t3.small 只有 1.9 GB RAM，Streamlit 起來已吃 1.2 GB（watcher 掃 transformers
@@ -87,14 +116,12 @@ _KEYWORD_MAX_DOCS = 200
 def _extract_keywords_tfidf(titles: list[str], top_n: int = 20) -> pd.DataFrame:
     """用 TF-IDF 從標題抽關鍵字（1-2 gram）。回傳 Word/Score DataFrame。"""
     from sklearn.feature_extraction.text import TfidfVectorizer
-    # token_pattern 改為「至少 2 個非空白字元」以支援中文單字
     vec = TfidfVectorizer(
         ngram_range=(1, 2),
         token_pattern=r"(?u)\b\w{2,}\b",
         max_features=2000,
     )
     matrix = vec.fit_transform(titles)
-    # 全部文件的 TF-IDF 加總 = 該詞在語料中的總重要度
     scores = matrix.sum(axis=0).A1
     vocab  = vec.get_feature_names_out()
     top_idx = scores.argsort()[::-1][:top_n]
@@ -109,10 +136,14 @@ elif st.button(f"載入關鍵字分析（取 top {_KEYWORD_MAX_DOCS} 熱門文�
         top_20_words = _extract_keywords_tfidf(sample['Title'].tolist(), top_n=20)
     st.dataframe(top_20_words)
 
-st.subheader("情緒 vs 股價關聯分析")
+
+# ─── 情緒 vs 股價關聯分析（TW: PTT+cnyes → 0050）────────────────────────────
+st.subheader("TW 情緒 vs 0050 股價關聯分析")
 
 @st.cache_data
-def load_correlation_data():
+def load_tw_correlation():
+    tw_sources = sources_by_market("TW")
+    placeholders = ",".join(["%s"] * len(tw_sources))
     with get_pg() as conn:
         return pd.read_sql_query(f"""
             SELECT
@@ -125,21 +156,57 @@ def load_correlation_data():
                     AVG(s.score)         AS avg_sentiment
                 FROM {ARTICLES_TABLE} a
                 JOIN {SENTIMENT_SCORES_TABLE} s ON s.article_id = a.article_id
+                JOIN {SOURCES_TABLE} src ON src.source_id = a.source_id
+                WHERE src.source_name IN ({placeholders})
                 GROUP BY DATE(a.published_at)
             ) sub
             JOIN {STOCK_PRICES_TABLE} sp
-                -- 觀察情緒分數的下一個交易日股價變化，比對市場情緒與價格變化是否存在關聯
                 ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
             ORDER BY sub.sentiment_date
-        """, conn)
+        """, conn, params=tw_sources)
 
-corr_df = load_correlation_data()
-
-if corr_df.empty:
-    st.warning("目前尚無情緒分數資料，待 BERT 模型上線後顯示。")
+tw_corr = load_tw_correlation()
+if tw_corr.empty:
+    st.warning("尚無 TW 情緒 + 股價資料")
 else:
-    st.pyplot(plot_sentiment_vs_stock(corr_df, TWSE_STOCK_NAME))
-    st.pyplot(plot_sentiment_and_price_trend(corr_df, TWSE_STOCK_NAME))
+    st.pyplot(plot_sentiment_vs_stock(tw_corr, TW_STOCK_NAME, market_label="TW"))
+    st.pyplot(plot_sentiment_and_price_trend(tw_corr, TW_STOCK_NAME, market_label="TW"))
+
+
+# ─── 情緒 vs 股價關聯分析（US: Reddit+CNN+WSJ+MarketWatch → VOO）─────────────
+st.subheader("US 情緒 vs VOO 股價關聯分析")
+
+@st.cache_data
+def load_us_correlation():
+    us_sources = sources_by_market("US")
+    placeholders = ",".join(["%s"] * len(us_sources))
+    with get_pg() as conn:
+        return pd.read_sql_query(f"""
+            SELECT
+                sub.sentiment_date,
+                sub.avg_sentiment,
+                sp.change              AS next_day_change
+            FROM (
+                SELECT
+                    DATE(a.published_at) AS sentiment_date,
+                    AVG(s.score)         AS avg_sentiment
+                FROM {ARTICLES_TABLE} a
+                JOIN {SENTIMENT_SCORES_TABLE} s ON s.article_id = a.article_id
+                JOIN {SOURCES_TABLE} src ON src.source_id = a.source_id
+                WHERE src.source_name IN ({placeholders})
+                GROUP BY DATE(a.published_at)
+            ) sub
+            JOIN {US_STOCK_PRICES_TABLE} sp
+                ON sp.trade_date = sub.sentiment_date + INTERVAL '1 day'
+            ORDER BY sub.sentiment_date
+        """, conn, params=us_sources)
+
+us_corr = load_us_correlation()
+if us_corr.empty:
+    st.warning("尚無 US 情緒 + 股價資料（待 CNN/WSJ/MarketWatch 爬蟲跑完後顯示）")
+else:
+    st.pyplot(plot_sentiment_vs_stock(us_corr, US_STOCK_NAME, market_label="US"))
+    st.pyplot(plot_sentiment_and_price_trend(us_corr, US_STOCK_NAME, market_label="US"))
 
 
 # ─── AI 模型預測結果（Walk-Forward）──────────────────────────────────────────
@@ -156,7 +223,7 @@ def load_ai_model_prediction(market: str) -> Optional[pd.DataFrame]:
     return run_ai_model_prediction(market)
 
 
-_MARKETS = [("tw", "0050 元大台灣50"), ("us", "VOO Vanguard S&P 500 ETF")]
+_MARKETS = [("tw", TW_STOCK_NAME), ("us", US_STOCK_NAME)]
 
 for market_code, market_name in _MARKETS:
     st.markdown(f"#### {market_name}")

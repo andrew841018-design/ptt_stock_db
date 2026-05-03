@@ -3,7 +3,7 @@ import datetime
 from typing import Literal, Optional
 from fastapi import FastAPI, Query, HTTPException, Depends
 from pydantic import BaseModel
-from pg_helper import get_pg, get_pg_readonly
+from pg_helper import get_pg_readonly
 from cache_helper import get_cache, set_cache
 from config import ARTICLES_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE
 from data_mart import get_daily_sentiment
