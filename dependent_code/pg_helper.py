@@ -1,15 +1,38 @@
 import psycopg2
 from contextlib import contextmanager
-from config import PG_CONFIG
+from config import PG_CONFIG, PG_API_CONFIG, PG_ETL_CONFIG
 
 @contextmanager
-def get_pg():
-    conn = psycopg2.connect(**PG_CONFIG)#展開PG_CONFIG
+def get_pg(config=None):
+    """PostgreSQL 連線 context manager，可指定角色的 config dict"""
+    conn = psycopg2.connect(**(config or PG_CONFIG))
     try:
-        yield conn#return the connection to the context manager
-        conn.commit()#commit the transaction after with finish
+        yield conn
+        conn.commit()
     except Exception:
-        conn.rollback()#rollback the transaction if an error occurs
+        conn.rollback()
         raise
     finally:
-        conn.close()#close the connection after with finish
+        conn.close()
+
+@contextmanager
+def get_pg_readonly():
+    """API 唯讀連線（api_user，只有 SELECT 權限）"""
+    conn = psycopg2.connect(**PG_API_CONFIG)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+@contextmanager
+def get_pg_etl():
+    """ETL 讀寫連線（etl_user，有 INSERT/UPDATE/DELETE 權限）"""
+    conn = psycopg2.connect(**PG_ETL_CONFIG)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

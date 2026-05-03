@@ -18,4 +18,12 @@ great_expectations==0.18.19
 keybert
 transformers
 torch
+datasets
+scikit-learn
+seaborn
+accelerate
 yfinance
+pymongo
+pyarrow
+gspread
+python-jose[cryptography]

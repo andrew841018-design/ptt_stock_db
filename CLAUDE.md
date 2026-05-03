@@ -237,7 +237,7 @@ project/
 |------|------|
 | PostgreSQL Schema 設計 | 4 張正規化表：sources / articles / comments / sentiment_scores |
 | sentiment_scores 設計決策 | 用 target_type 統一管理文章＋留言情緒，支援多模型（jieba / bert）|
-| PostgreSQL 建立 | Docker 容器 inspiring_wozniak，port 5432，database: ptt_stock |
+| PostgreSQL 建立 | Docker 容器 ptt_stock_db，port 5432，database: stock_analysis_db |
 | create_schema.sql 執行 | 4 張表 + 4 個 index 建立完成 |
 | run_etl.sh 逐行理解 | 見下方學到的概念 |
 | ge_validation.py bug 發現 | try/except 兩行 import 路徑相同，except 應改為 `from config import` |
@@ -757,13 +757,184 @@ project/
 
 #### 下次繼續
 
-- [ ] pipeline 跑完確認各來源資料量（PTT / cnyes / Reddit / TWSE / VOO）
-- [ ] Arctic Shift PID 95637 確認狀態（big_data_etl 目錄已刪，process 是否還正常）
+#### 完成項目（2026-04-05 下午）
+
+| 項目 | 說明 |
+|------|------|
+| `dw_schema.py` 新建 | Star Schema DDL：`dim_date` / `dim_source` / `dim_stock` / `fact_sentiment` + Materialized View（`mv_daily_summary` / `mv_hot_stocks`）|
+| `dw_etl.py` 新建 | OLTP → DW incremental ETL；`source_name` denormalize 進 fact；`run_etl(do_cluster=True)` 支援 CLUSTER |
+| Snowflake 延伸 | 新增 `dim_market`（TW / US）；`dim_source` 加 FK `market_id`；支援三層 JOIN：`fact → dim_source → dim_market` |
+| `bert_sentiment.py` 新建 | BERT fine-tune + evaluate（F1 / Confusion Matrix）+ predict + 批次推論入庫（zero-shot fallback） |
+| BERT 批次推論啟動 | PID 23436，190k 篇文章推論中，結果寫入 `sentiment_scores` |
+| Claude Code 權限設定 | `~/.claude/settings.json`：`Bash(*)` 萬用字元 allow + `PermissionRequest` hook 自動 approve（見下方「Claude Code 設定」）|
+
+#### Claude Code 權限設定（解決一直跳 prompt 的問題）
+
+**問題**：GUI 每次執行工具都跳 permission confirm prompt。
+**根因**：project 層 `settings.local.json` 有舊的 allow 白名單，蓋掉 global 設定；且 `bypassPermissions` 需要 `allowDangerouslySkipPermissions: true` + GUI 不支援 `bypassPermissions`。
+**解法**：三個設定檔都改成以下格式：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)", "Read(*)", "Edit(*)", "Write(*)", "Glob(*)", "Grep(*)",
+      "WebFetch(*)", "WebSearch(*)"
+    ]
+  },
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+套用位置：
+- `~/.claude/settings.json`（global）
+- `Data_engineer/.claude/settings.local.json`（project）
+- `Data_engineer/project/.claude/settings.local.json`（sub-project）
+
+**重要**：每次修改設定檔後需 Cmd+Q 重啟 Claude Code GUI 才生效。`PermissionRequest` hook 是攔截 prompt 最可靠的方式。
+
+#### 完成項目（2026-04-05 延續 session）
+
+| 項目 | 說明 |
+|------|------|
+| `datalake.py` 新建 | S3 Data Lake 三層架構：raw(JSON) / processed(Parquet) / curated(聚合 Parquet) |
+| `mongo_helper.py` 新建 | MongoDB Docker 本機，`raw_articles` collection，`sync_from_pg()` PG→MongoDB 同步 |
+| `ner.py` 新建 | NER 命名實體識別：regex 抓代號 + 最長匹配抓公司名稱；`stock_mentions` + `ner_done` 表 |
+| `labeling_tool.py` 新建 | Streamlit 標注工具，供人工標注情緒（正/中/負）後 fine-tune BERT |
+| Data Mart 實作 | `data_mart.py` 新建 + `dw_schema.py` 加入 `mart_daily_summary` / `mart_hot_stocks` table + partial index |
+| Materialized View 移除 | `mv_daily_summary` / `mv_hot_stocks` 移除，改用 Data Mart table（更貼近業界 104 JD 用語，可跨 DB 移植） |
+| `dw_etl.py` 更新 | `refresh_views()` 移除，改呼叫 `data_mart.refresh_all()`（TRUNCATE + INSERT） |
+| `backtest.py` 新建 | 回測系統：yfinance 抓 0050/VOO 歷史股價 → 情緒 vs 隔日漲跌 → RandomForest Walk-Forward Validation → 累積報酬曲線 |
+| `fetch_etf_holdings.py` 新建 | TW 50 支（TWSE 融資限額 × 收盤價做市值代理取前 50）+ US 503 支（Wikipedia S&P 500） |
+| `stock_dict.json` 更新 | TW 50 支、US 503 支，供 NER 使用 |
+| Spark 移除 | `spark_analysis.py` 刪除、`pyspark` 從 requirements.txt 移除（待上完課再實作） |
+| `lxml` 安裝 | `pd.read_html` 所需，加入 conda env |
+
+#### 設計決策
+
+- **Data Mart vs Materialized View**：選 Data Mart table。MV 是 PostgreSQL 特有物件（`REFRESH MATERIALIZED VIEW`）；Data Mart 是標準 table（`TRUNCATE + INSERT`），可跨 DB 移植。104 JD 都用「Data Mart」而非「MV」，因為 Data Mart 是架構概念（DW 的子集，針對部門/用途），MV 只是實作技術。
+- **Partial index**：`CREATE INDEX idx_hot ON mart_hot_stocks(push_count) WHERE push_count > 100`，只索引真正熱門的資料，索引小、查詢快。
+- **stock_dict.json 範圍**：用戶要求 TW 只保留 0050 的 50 支持股、US 只保留 S&P 500（VOO），不做全上市股票。
+
+#### 下次繼續
+
+- [ ] BERT 推論完成後重跑 `dw_etl.py`，讓 `avg_sentiment` 從 NULL 填入實際值
+- [ ] 啟動 labeling_tool（`streamlit run labeling_tool.py`）標注 500 篇，再 fine-tune BERT
 - [ ] `Phase4·多來源ETL` tag 等 pipeline.py ThreadPoolExecutor 確認無誤後重打
 - [ ] PII masking（author hash 化）
 - [ ] JWT Authentication
-- [ ] Phase 5：BERT 情緒分析實作（bert_sentiment.py，config.py 框架已就位）
-- [ ] Phase 5：資料倉儲（星型 schema）
+- [ ] **Google Looker Studio 儀表板**（looker_export.py 已完成，CSV 已匯出）：
+  - 把 `looker_output/` 下三個 CSV 上傳 Google Sheets
+  - 開 https://lookerstudio.google.com 建立報表
+  - 四個圖表：情緒折線圖 / 文章數長條圖 / 熱門文章表格 / 來源圓餅圖
+  - 取得分享連結放進 readme
+- [ ] Phase 5 剩餘：Spark/PySpark（待上完課再做）
+- [ ] Phase 6：Airflow、Kafka、Kubernetes
+
+---
+
+### 2026-04-05（延續 session 2 — context recovery）
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| `reparse.py` 新建 | 完整資料修復管線：diagnose() 掃 PG → 分類來源 → MongoDB raw re-parse → UPDATE PG |
+| `pipeline.py` 整合 repair | transform() 的 QA 失敗時自動呼叫 `repair()`，修復後重跑 QA，仍失敗才 pipeline 中止 |
+| `mongo_helper.py` 升級 | 新增 `raw_responses` collection + `save_raw_response()` + `get_raw_response()` + `count_raw_responses()` |
+| `base_scraper.py` 原始存檔 | `_archive_raw()` 每次 HTTP 成功後自動存入 MongoDB raw_responses，降級設計（`_MONGO_OK` flag） |
+| `config.py` ARTICLE_LABELS_TABLE | 新增 `ARTICLE_LABELS_TABLE = "article_labels"`，bert_sentiment / labeling_tool / schema 同步改用 |
+| `looker_export.py` 新建 | 匯出三份 CSV（daily_sentiment / hot_articles / source_stats）+ optional gspread 上傳 |
+| launchd 改為每小時 | 移除 `Hour` key，只留 `Minute=25`，每小時 :25 分執行 |
+| `diagnose()` BSON 修復 | `$in` 查詢超過 16MB 上限 → 改為分批查詢（每批 500 URL） |
+| 三份文件更新 | CLAUDE.md / readme.md / project_notes.md 同步更新 |
+
+#### 學到的概念
+
+- **MongoDB raw_responses 的價值**：存 HTTP 原文而非解析後的資料，parser bug 修完後直接 re-parse，不需重新爬取
+- **Graceful Degradation 模式**：`_MONGO_OK` flag + try/except，附加功能掛掉不影響主流程
+- **BSON 16MB 限制**：MongoDB 單個 document（含查詢 command）不能超過 16MB，`$in` 大量 URL 時必須分批
+- **pipeline 自動修復設計**：QA 失敗 → catch → repair → 重跑 QA → 仍失敗才真正中止
+- **UPDATE 只更新非 None 欄位**：避免 re-parse 拿不到的欄位覆蓋 DB 已有的好值
+
+#### 下次繼續
+
+- [ ] BERT 推論完成後重跑 `dw_etl.py`，讓 `avg_sentiment` 從 NULL 填入實際值
+- [ ] 啟動 labeling_tool（`streamlit run labeling_tool.py`）標注 500 篇，再 fine-tune BERT
+- [ ] `Phase4·多來源ETL` tag 等 pipeline.py ThreadPoolExecutor 確認無誤後重打
+- [ ] PII masking（author hash 化）
+- [ ] JWT Authentication
+- [ ] **Google Looker Studio 儀表板**（looker_export.py 已完成，CSV 已匯出）
+- [ ] Phase 6：Kubernetes、Prometheus、Grafana、Docker Compose、Airflow
+
+#### ⚠️ PTT 專案完成後提醒
+
+**開一個 BTC Pipeline 練習以下技能**（PTT 專案資料量不足，無法有效練習）：
+
+| 技能 | PTT 做不到的原因 | BTC Pipeline 怎麼練 |
+|------|------------------|---------------------|
+| Spark + PySpark | 600k rows，JVM 啟動 overhead > 實際計算 | 用公開大資料集（NYC Taxi 10GB+）跑 Databricks Community |
+| Hadoop / Hive / HDFS | 100MB 資料放單機就好 | Docker Hadoop cluster + Hive 查詢 HDFS |
+| Spark ML Pipeline | 需要大量資料才能展現優勢 | 與 Spark 同一個 BTC Pipeline |
+| Kafka Streaming | PTT 無即時串流來源 | 模擬即時資料源 → Kafka → Consumer → DB |
+| Partition Strategy | 600k rows 分區沒有可測量的效能提升 | 大資料集 + PostgreSQL Range Partition |
+| Data Lake (S3) | 已用 MongoDB raw_responses 取代 | 搭配 Spark 練 S3 raw → processed → curated 三層 |
+
+---
+
+### 2026-04-08
+
+#### 完成項目
+
+| 項目 | 說明 |
+|------|------|
+| Database 改名 | `ptt_stock` → `stock_analysis_db`（PostgreSQL ALTER DATABASE + .env + config/schema/backup/mongo_helper 預設值同步）|
+| source_name 統一 | SOURCES dict name 從 "PTT Stock"/"鉅亨網"/"Reddit Finance" 改成 "ptt"/"cnyes"/"reddit"，與 dict key 一致 |
+| config.py 局部性重構 | 15+ 只有單一模組用的常數搬回各自檔案（PTT_SCRAPE_SLEEP→ptt_scraper、REDIS_HOST→cache_helper 等）|
+| schema.py 角色權限註解 | CREATE_ROLES SQL 每行加上中文註解（pg_roles、IF NOT EXISTS、GRANT 三層權限、SEQUENCE、REVOKE 防禦）|
+| schema.py 變數直讀 | api_user/api_pw/etl_user/etl_pw 從 `PG_API_CONFIG["user"]` 改為 `os.environ.get()` 直讀，移除間接層 |
+| backup.py 直讀 .env | 移除 `from config import PG_CONFIG`，改為 `os.environ.get()` 直接讀取 DB 連線參數 |
+| MongoDB 清理 | 移除 raw_articles collection 及相關程式碼（mongo_helper/base_scraper），只保留 raw_responses |
+| `_archive_raw` → `_store_raw` | base_scraper 方法重命名，區分 `_store_raw`（準備參數）vs `save_raw_response`（實際寫入 MongoDB）|
+| `_source_key` 移除 | 四支爬蟲的 `_source_key` class variable 移除，`_store_raw` 改用 `self.get_source_info().get("name")` |
+| test_api.py 修正 | 加 `app.dependency_overrides[verify_token]` bypass JWT + `get_pg` → `get_pg_readonly`，13 tests passing |
+| auth.py 加註解 | verify_token 函式加中文註解：token 擷取、jwt.decode 三功能、JWTError 涵蓋範圍 |
+| looker_export.py 清理 | 移除未使用的 `from datetime import date` |
+| project_notes.md 更新 | config 邊界 + Markdown 預覽 + GRANT/REVOKE 權限層級 + SEQUENCE 說明 |
+
+#### 學到的概念
+
+- **PostgreSQL 三層權限**：`CONNECT`（連線）→ `USAGE`（看到 table）→ `SELECT`（讀資料），每層獨立，缺一不可
+- **USAGE vs SELECT 成對**：USAGE = 進入 schema，SELECT = 讀資料；只給其中一個都會 permission denied
+- **SEQUENCE 權限**：`USAGE` 允許 `nextval()`（INSERT 產生 ID），`SELECT` 允許 `currval()`（讀回剛才的 ID）
+- **`pg_roles`**：PostgreSQL 內建系統表，裝好就有，不用自己建
+- **`CREATE ROLE ... LOGIN`**：建帳號 + 允許登入，沒加 `LOGIN` 的角色連不進 DB
+- **`DO $$ ... END $$`**：PostgreSQL 匿名程式區塊，讓 SQL 可以用 IF/THEN 邏輯
+- **DDL 不能用 `%s`**：`CREATE ROLE`、`GRANT` 的 identifier（角色名）不能用 `%s`（會加引號），只能用 `.format()`
+- **`ALTER DEFAULT PRIVILEGES`**：對未來新建的 table 自動授權，否則新表沒權限
+- **REVOKE 防禦性設計**：明確收回 api_user 寫入權限，防止有人誤下 `GRANT ALL`
+- **`ALTER DATABASE RENAME`**：DB 改名需無人連線，改完後 `.env` 同步即可，程式碼透過 `os.environ.get()` 自動讀到新名稱
+- **config 間接層簡化**：`PG_API_CONFIG["user"]` 套兩層不如 `os.environ.get("PG_API_USER")` 直讀一層
+- **`app.dependency_overrides[verify_token]`**：FastAPI 內建 dict，key 放函式物件，value 放替代 callable，測試時跳過 JWT
+
+#### 下次繼續
+
+- [ ] 恢復 `reparse.py`（已刪且 untracked，需重寫）
+- [ ] 恢復 `test_reparse.py`（同上）
+- [ ] PII masking（pii_masking.py 未執行）
+- [ ] BERT sentiment_scores 表仍為空
+- [ ] 每日 Mock Interview（完整面試格式，非只專案）
 - [ ] Phase 6：Airflow、Kafka、Kubernetes
 
 ---
@@ -781,6 +952,15 @@ project/
 每次改動，務必檢查是否遵守：
 
 - clean code/system design/design pattern/重構原則
+
+### 工作方式（重要）
+
+**開始任何多步驟任務前**：
+1. 先從宏觀角度審視整個專案現況與目標
+2. 把所有需要釐清的問題**一次列出**，等 Andrew 一次回答完
+3. 拿到答案後，**不中途詢問**，一路執行到底
+
+中途問答會打斷流程——如有疑問，把問題累積到「任務啟動前」一次問清楚。
 
 ### 關鍵字速查
 
