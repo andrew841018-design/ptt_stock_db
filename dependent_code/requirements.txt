@@ -2,6 +2,7 @@ requests
 beautifulsoup4
 pandas
 fastapi
+pydantic
 uvicorn
 streamlit
 matplotlib
@@ -17,3 +18,4 @@ great_expectations==0.18.19
 keybert
 transformers
 torch
+yfinance

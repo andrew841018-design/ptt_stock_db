@@ -1,6 +1,7 @@
 import logging
 from pg_helper import get_pg
-from config import ARTICLES_TABLE, COMMENTS_TABLE, SENTIMENT_SCORES_TABLE, STOCK_PRICES_TABLE, SOURCES_TABLE, SOURCES
+from config import (ARTICLES_TABLE, COMMENTS_TABLE, SENTIMENT_SCORES_TABLE,
+                    STOCK_PRICES_TABLE, US_STOCK_PRICES_TABLE, SOURCES_TABLE, SOURCES)
 
 
 def QA_checks():
@@ -35,7 +36,8 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：articles.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：articles 必填欄位無 NULL")
 
-            # 來源專屬檢查
+            # 來源專屬檢查：PTT push_count 不允許 NULL
+            # （Reddit 的 push_count 可為 NULL，不在此檢查範圍）
             cursor.execute(f"""
                 SELECT COUNT(*) FROM {ARTICLES_TABLE} a
                 JOIN {SOURCES_TABLE} s ON s.source_id = a.source_id
@@ -79,7 +81,7 @@ def QA_checks():
                 raise ValueError(f"QA FAILED：sentiment_scores.score 有 {null_scores} 筆 NULL")
             logging.info("QA PASSED：sentiment_scores 必填欄位無 NULL")
 
-            # ── stock_prices ──────────────────────────────────────────────
+            # ── stock_prices（TW：0050）────────────────────────────────────
             cursor.execute(f"SELECT COUNT(*) FROM {STOCK_PRICES_TABLE}")
             price_count = cursor.fetchone()[0]
             if price_count == 0:
@@ -92,6 +94,29 @@ def QA_checks():
                 if null_count > 0:
                     raise ValueError(f"QA FAILED：stock_prices.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：stock_prices 必填欄位無 NULL")
+
+            # ── us_stock_prices（US：VOO）─────────────────────────────────
+            cursor.execute(f"SELECT COUNT(*) FROM {US_STOCK_PRICES_TABLE}")
+            us_price_count = cursor.fetchone()[0]
+            if us_price_count == 0:
+                raise ValueError(f"QA FAILED：{US_STOCK_PRICES_TABLE} 表是空的")
+            logging.info(f"QA PASSED：us_stock_prices 共 {us_price_count} 筆")
+
+            # trade_date / close：不允許任何 NULL
+            for col in ("trade_date", "close"):
+                cursor.execute(f"SELECT COUNT(*) FROM {US_STOCK_PRICES_TABLE} WHERE {col} IS NULL")
+                null_count = cursor.fetchone()[0]
+                if null_count > 0:
+                    raise ValueError(f"QA FAILED：us_stock_prices.{col} 有 {null_count} 筆 NULL")
+            logging.info("QA PASSED：us_stock_prices 必填欄位無 NULL")
+
+            # change：第一筆無前一日收盤，允許 NULL，有則 warning
+            cursor.execute(f"SELECT COUNT(*) FILTER (WHERE change IS NULL) FROM {US_STOCK_PRICES_TABLE}")
+            null_change = cursor.fetchone()[0]
+            if null_change > 0:
+                logging.warning(f"QA WARNING：us_stock_prices.change 有 {null_change} 筆 NULL（每支 ETF 第一筆預期如此）")
+            else:
+                logging.info("QA PASSED：us_stock_prices.change 無 NULL")
 
     logging.info("QA 全部通過")
 

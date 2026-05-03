@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 from great_expectations.dataset import PandasDataset
 from pg_helper import get_pg
-from config import ARTICLES_TABLE, SOURCES_TABLE, SOURCES
+from config import ARTICLES_TABLE, SOURCES_TABLE, SOURCES, US_STOCK_PRICES_TABLE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -46,6 +46,33 @@ def ge_validate():
     cnyes_df = df[df['Source'] == SOURCES["cnyes"]["name"]]
     ge_cnyes = PandasDataset(cnyes_df)
     _log_result(ge_cnyes.expect_column_values_to_match_regex('Url', r'news\.cnyes\.com/news/id/\d+'))
+
+    # ── Reddit 專屬檢查 ────────────────────────────────────────────────────────
+    reddit_df = df[df['Source'] == SOURCES["reddit"]["name"]]
+    if not reddit_df.empty:
+        ge_reddit = PandasDataset(reddit_df)
+        # URL 格式：https://www.reddit.com/r/{subreddit}/comments/{id}/...
+        _log_result(ge_reddit.expect_column_values_to_match_regex(
+            'Url', r'reddit\.com/r/\w+/comments/'))
+        # push_count 應在 -100~100（Reddit score clamp 過）
+        _log_result(ge_reddit.expect_column_values_to_be_between('Push_count', -100, 100))
+    else:
+        logging.info("GE SKIP：Reddit 無資料（尚未爬取）")
+
+    # ── us_stock_prices 檢查 ───────────────────────────────────────────────────
+    with get_pg() as conn:
+        us_df = pd.read_sql_query(
+            f"SELECT trade_date, close, change FROM {US_STOCK_PRICES_TABLE}", conn)
+
+    if not us_df.empty:
+        ge_us = PandasDataset(us_df)
+        _log_result(ge_us.expect_column_values_to_not_be_null('trade_date'))
+        _log_result(ge_us.expect_column_values_to_not_be_null('close'))
+        _log_result(ge_us.expect_column_values_to_be_between('close', 1, 10000))
+        # change 每支 ETF 第一筆允許 NULL（無前一日收盤價）；非 NULL 的值應在合理範圍
+        _log_result(ge_us.expect_column_values_to_be_between('change', -100, 100, mostly=0.99))
+    else:
+        logging.warning("GE WARN：us_stock_prices 無資料")
 
 
 if __name__ == "__main__":
