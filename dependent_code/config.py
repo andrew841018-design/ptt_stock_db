@@ -13,17 +13,41 @@ PG_CONFIG = {
     "password": os.environ.get("PG_PASSWORD", ""),
 }
 
-# PTT 來源資訊
-PTT_SOURCE_NAME = "PTT Stock"
-PTT_SOURCE_URL  = "https://www.ptt.cc/bbs/Stock"
+# ── 各來源設定（新增來源只需在這裡加一組）──────────────────────────────
+#
+# 每個來源包含：
+#   name      → 寫入 sources 表的顯示名稱
+#   url       → 來源首頁（同時作為 sources 表的唯一識別）
+#   num_pages → 每次爬取的頁數（各來源節奏不同，分開控制）
+#
+SOURCES = {
+    "ptt": {
+        "name":      "PTT Stock",
+        "url":       "https://www.ptt.cc/bbs/Stock",
+        "num_pages": 2000,
+    },
+    "cnyes": {
+        "name":      "鉅亨網",
+        "url":       "https://news.cnyes.com/news/cat/tw_stock",
+        "num_pages": 1000,
+        "page_size": 30,
+    },
+}
 
-# 爬蟲設定
+# 爬蟲共用設定
 MAX_RETRY = 5
-SLEEP_INTERVAL = 0.5
-NUM_OF_PAGES = 2000
+PTT_SCRAPE_SLEEP = 0.3  # 文章內頁請求間隔（避免被封鎖）
 
-# 爬蟲過濾關鍵字（這類文章不爬）
+# 爬蟲過濾關鍵字（這類文章不爬，目前只有 PTT 用到）
 SKIP_KEYWORDS = ["公告", "盤後閒聊", "盤中閒聊", "情報"]
+
+TWSE_STOCK_NO   = "0050"
+TWSE_STOCK_NAME = "元大台灣50"
+
+# TWSE 每次抓幾個月的歷史資料（1 = 只抓當月，12 = 抓一整年）
+TWSE_MONTHS = 12
+TWSE_SLEEP_INTERVAL = 3   # TWSE 限速：每次請求間隔至少 3 秒
+TWSE_TIMEOUT        = 10  # TWSE API 請求 timeout（秒）
 
 # Redis 快取設定
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
@@ -35,3 +59,19 @@ ARTICLES_TABLE = "articles"
 COMMENTS_TABLE = "comments"
 SENTIMENT_SCORES_TABLE = "sentiment_scores"
 SOURCES_TABLE = "sources"
+STOCK_PRICES_TABLE = "stock_prices"
+
+# Cache key
+CACHE_KEY_ARTICLES = "articles_df"
+
+# AWS S3 備份設定
+S3_BUCKET = "ptt-sentiment-backup"
+DOCKER_PATH = "/usr/local/bin/docker"
+DB_CONTAINER = "ptt_stock_db"
+
+# ── BERT 情緒分析設定 ─────────────────────────────────────────────────────
+BERT_MODEL      = "lxyuan/distilbert-base-multilingual-cased-sentiments-student"
+PUSH_TAG_WEIGHT = 0.3   # 推噓對留言情緒的加權幅度（應用標注資料集後調整）
+TITLE_WEIGHT    = 0.3   # 標題情緒在綜合分數的比重
+CONTENT_WEIGHT  = 0.4   # 內文情緒在綜合分數的比重
+COMMENT_WEIGHT  = 0.3   # 留言情緒在綜合分數的比重
