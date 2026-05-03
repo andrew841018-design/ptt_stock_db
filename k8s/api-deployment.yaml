@@ -1,0 +1,114 @@
+# =============================================================================
+# api-deployment.yaml
+# -----------------------------------------------------------------------------
+# FastAPI REST API 的 Deployment 與 Service。
+#
+# - Deployment：2 個副本（replicas），確保高可用性
+# - Service：LoadBalancer 類型，對外暴露 port 8000
+# - 健康檢查：liveness/readiness probe 打 /health endpoint
+# - 環境變數：從 ConfigMap（非敏感）+ Secret（敏感）注入
+# - 資源限制：256Mi 記憶體 / 500m CPU
+#
+# 對應程式碼：dependent_code/api.py（uvicorn 啟動）
+#
+# 用法：kubectl apply -f api-deployment.yaml
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-deployment
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: api
+spec:
+  # 2 個副本確保 API 高可用，一個 Pod 重啟時另一個仍可服務
+  replicas: 2
+  selector:
+    matchLabels:
+      component: api
+  template:
+    metadata:
+      labels:
+        app: stock-sentiment
+        component: api
+    spec:
+      containers:
+        - name: api
+          # 替換為實際的 Docker image（推送至 ECR / Docker Hub 後填入）
+          # 建議改用 pinned tag（例 v1.2.3）而非 :latest，才能精準 rollback
+          image: stock-sentiment-api:latest
+          # Always：每次排程 Pod 都重新從 registry 拉 image
+          # 避免雲端 node 有舊版快取 → deploy 後 Pod 仍跑舊 code
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          # uvicorn 啟動指令（對應 deploy.yml 的啟動方式）
+          command: ["uvicorn"]
+          args: ["api:app", "--host", "0.0.0.0", "--port", "8000"]
+          workingDir: /app
+
+          # --- 環境變數注入 ---
+          envFrom:
+            # 非敏感設定（PG_HOST, REDIS_HOST 等）
+            - configMapRef:
+                name: stock-sentiment-config
+            # 敏感設定（PG_PASSWORD, JWT_SECRET_KEY 等）
+            - secretRef:
+                name: stock-sentiment-secret
+
+          # --- 資源限制 ---
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+          # --- 健康檢查 ---
+          # livenessProbe：偵測容器是否卡死，失敗時 K8s 會重啟容器
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            # 容器啟動後等 15 秒再開始檢查（讓 uvicorn 有時間啟動）
+            initialDelaySeconds: 15
+            # 每 30 秒檢查一次
+            periodSeconds: 30
+            # 連續 3 次失敗才判定為不健康
+            failureThreshold: 3
+
+          # readinessProbe：偵測容器是否準備好接收流量
+          # 未通過前 Service 不會把流量導過來
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+---
+# Service：對外暴露 API，讓外部流量能連到 Pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: api
+spec:
+  # LoadBalancer：雲端環境會自動建立外部負載平衡器（如 AWS ELB）
+  # 本地測試可改為 NodePort
+  type: LoadBalancer
+  selector:
+    component: api
+  ports:
+    - name: http
+      port: 8000            # Service 對外埠
+      targetPort: 8000      # 對應容器的 containerPort
+      protocol: TCP

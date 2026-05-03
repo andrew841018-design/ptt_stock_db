@@ -1,0 +1,79 @@
+# =============================================================================
+# cronjob.yaml
+# -----------------------------------------------------------------------------
+# ETL Pipeline 的定時排程（CronJob），每小時執行一次。
+#
+# - 排程：每小時的第 25 分鐘（與現有 launchd 排程一致）
+# - 執行內容：python pipeline.py（完整 7-step ETL）
+#   schema -> extract -> transform -> pii -> bert -> dw_etl -> backup
+#   -> ai_model_prediction
+# - 併發策略：Forbid（前一次未完成時不啟動新的，避免重複爬取/寫入）
+# - 歷史保留：成功 3 筆 / 失敗 1 筆（方便除錯）
+# - 資源限制：512Mi 記憶體 / 1000m CPU（與 worker 一致）
+#
+# 對應程式碼：dependent_code/pipeline.py
+#
+# 用法：kubectl apply -f cronjob.yaml
+# =============================================================================
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etl-cronjob
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: etl
+spec:
+  # 每小時第 25 分鐘執行（與 launchd 排程 Minute=25 一致）
+  schedule: "25 * * * *"
+
+  # Forbid：上一次 Job 還在跑時，不啟動新的（避免並行 ETL 造成資料衝突）
+  concurrencyPolicy: Forbid
+
+  # 保留最近 3 次成功和 1 次失敗的 Job 記錄，方便查看歷史和除錯
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  # 若錯過排程（例如叢集短暫停機），最多容忍 200 秒內補跑
+  startingDeadlineSeconds: 200
+
+  jobTemplate:
+    spec:
+      # Job 失敗時不自動重試（ETL 冪等設計，下一個排程會重新跑）
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: stock-sentiment
+            component: etl
+        spec:
+          containers:
+            - name: etl-runner
+              # 替換為實際的 Docker image（與 worker 共用同一個 image）
+              # 建議改用 pinned tag（例 v1.2.3）而非 :latest，才能精準 rollback
+              image: stock-sentiment-worker:latest
+              # Always：每次 CronJob 觸發都重新拉 image，確保跑到最新 code
+              imagePullPolicy: Always
+              # 執行完整 pipeline（pipeline.py 的 run_pipeline()）
+              command: ["python", "pipeline.py"]
+              workingDir: /app
+
+              # --- 環境變數注入 ---
+              envFrom:
+                - configMapRef:
+                    name: stock-sentiment-config
+                - secretRef:
+                    name: stock-sentiment-secret
+
+              # --- 資源限制 ---
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "500m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "1000m"
+
+          # Job 完成或失敗後不重啟（由 CronJob 下次排程處理）
+          restartPolicy: Never

@@ -1,0 +1,79 @@
+# =============================================================================
+# redis-deployment.yaml
+# -----------------------------------------------------------------------------
+# Redis 快取服務的 Deployment + Service。
+#
+# - Deployment：1 個副本（快取不需要多副本，資料可重建）
+# - Service：ClusterIP（僅叢集內部存取），API 透過 redis-service 連線
+# - Redis 在本專案中用於 Cache-Aside Pattern（cache_helper.py），
+#   TTL 24 小時，加速 API 回應（37 倍提升）
+#
+# 對應 cache_helper.py 的 REDIS_HOST / REDIS_PORT 設定
+#
+# 用法：kubectl apply -f redis-deployment.yaml
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: redis
+spec:
+  # 快取服務 1 個副本即可，資料遺失時自動從 DB 重建（Cache-Aside 設計）
+  replicas: 1
+  selector:
+    matchLabels:
+      component: redis
+  template:
+    metadata:
+      labels:
+        app: stock-sentiment
+        component: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          ports:
+            - containerPort: 6379
+              protocol: TCP
+          # redis-server 啟動指令，設定最大記憶體與淘汰策略
+          command: ["redis-server"]
+          args:
+            # 最大記憶體 128MB（超過時淘汰最近最少使用的 key）
+            - "--maxmemory"
+            - "128mb"
+            # allkeys-lru：所有 key 都可被 LRU 淘汰（適合純快取場景）
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"
+
+---
+# --- Service：叢集內部存取入口 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: stock-sentiment
+  labels:
+    app: stock-sentiment
+    component: redis
+spec:
+  # ClusterIP：僅叢集內部存取（快取不需對外暴露）
+  type: ClusterIP
+  selector:
+    component: redis
+  ports:
+    - name: redis
+      port: 6379             # Service 埠
+      targetPort: 6379       # 對應容器的 containerPort
+      protocol: TCP
