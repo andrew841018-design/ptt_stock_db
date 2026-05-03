@@ -1,0 +1,24 @@
+ptt_sentiment:
+  target: dev
+  outputs:
+    # 本機 PostgreSQL（OLTP + 自建 DW）
+    dev:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'localhost') }}"
+      port: "{{ env_var('PG_PORT', '5432') | int }}"
+      user: "{{ env_var('PG_USER', 'postgres') }}"
+      password: "{{ env_var('PG_PASS', '') }}"
+      dbname: "{{ env_var('PG_DBNAME', 'ptt_stock') }}"
+      schema: public
+      threads: 4
+
+    # Google BigQuery — 雲端 DW
+    bigquery:
+      type: bigquery
+      method: service-account
+      project: "{{ env_var('GCP_PROJECT') }}"
+      dataset: "{{ env_var('BQ_DATASET', 'ptt_sentiment') }}"
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
+      threads: 4
+      location: "{{ env_var('BQ_LOCATION', 'US') }}"
+      timeout_seconds: 300

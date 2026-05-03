@@ -1,0 +1,30 @@
+version: 2
+
+sources:
+  - name: ptt
+    description: "PTT 股票情緒分析 OLTP 原始資料；PG 在 public schema，BQ 在同名 dataset"
+    schema: "{{ target.schema }}"
+    tables:
+      - name: articles
+        description: "爬取的文章（8 個來源）"
+        columns:
+          - name: article_id
+            tests: [unique, not_null]
+          - name: source_id
+            tests: [not_null]
+          - name: url
+            tests: [not_null]
+      - name: sentiment_scores
+        description: "BERT 情緒分數"
+        columns:
+          - name: score_id
+            tests: [unique, not_null]
+          - name: article_id
+            tests: [not_null]
+      - name: sources
+        description: "來源 master table"
+        columns:
+          - name: source_id
+            tests: [unique, not_null]
+          - name: source_name
+            tests: [not_null]
