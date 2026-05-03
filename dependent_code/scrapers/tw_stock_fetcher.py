@@ -2,118 +2,103 @@ import sys
 import time
 import logging
 from datetime import date
-from dateutil.relativedelta import relativedelta  # 方便做「往前推 N 個月」
+from typing import Optional
+from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
-from scrapers.base_scraper import get_with_retry
+import pandas as pd
+import yfinance as yf
+
 from pg_helper import get_pg
-from config import STOCK_PRICES_TABLE, TWSE_DELAY
+from config import STOCK_PRICES_TABLE
 
-TWSE_MONTHS = 12  # 每次抓幾個月的歷史資料（1 = 只抓當月，12 = 抓一整年）
-TWSE_TIMEOUT        = 10  # TWSE API 請求 timeout（秒）
+TW_STOCK_MONTHS = 120  # 每次抓幾個月的歷史資料（10 年）
 
-_STOCK_NO = "0050"  # 元大台灣50，固定追蹤單一標的
+_TICKER = "0050.TW"  # 元大台灣50，yfinance 代碼
 
-# TWSE 公開 API（不需要 API key）
-# 2024 起官方將 exchangeReport 改為 rwd/zh/afterTrading
-_API_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+_YF_MAX_RETRIES = 3
+_YF_BACKOFF_SECONDS = (5, 15, 30)
 
 
 class TwseFetcher:
     """
-    台灣證交所（TWSE）股價資料抓取器。
+    0050 元大台灣50 股價資料抓取器，使用 yfinance。
 
-    不繼承 BaseScraper：TWSE 抓的是股價時序資料，不走文章/留言流程。
-    HTTP retry 透過 import get_with_retry 共用，不需要繼承整個 BaseScraper。
+    改用 yfinance（原為 TWSE API）原因：
+    TWSE API 回傳的是名目收盤價，不會因股票分拆而回溯調整歷史資料，
+    導致分拆前後的價格序列不連續，buy-and-hold 計算產生嚴重偏差。
+    yfinance auto_adjust=True（預設）會自動調整分拆與除息，歷史序列一致。
 
-    資料來源：TWSE 公開 API
-      GET https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY
-          ?response=json&date=YYYYMMDD&stockNo=2330
-      每次回傳「該股票當月」所有交易日資料。
+    不繼承 BaseScraper（股價不是文章）。
     """
 
     def run(self) -> None:
-        """主流程：逐月抓 0050 股價，寫入 DB"""
-        months = self._build_month_list()
-        for yyyymmdd in tqdm(months, desc="0050 月份", file=sys.stderr):
+        """主流程：抓取 0050 近 N 個月股價，寫入 DB"""
+        logging.info(f"開始抓取 {_TICKER} 股價（近 {TW_STOCK_MONTHS} 個月）")
+        rows = self._fetch_price_data()
+        if rows:
+            self._save(rows)
+            logging.info(f"完成：{_TICKER}，共 {len(rows)} 筆")
+        else:
+            logging.warning(f"{_TICKER} 股價資料為空，略過")
+
+    def _fetch_price_data(self) -> list:
+        """
+        從 yfinance 抓 0050.TW 歷史日線資料（split/dividend adjusted）。
+        回傳 list of dict，每筆對應一個交易日。
+        漲跌 change = 當日收盤 - 前一日收盤。
+
+        yfinance 在 rate limit 期間可能回傳 None，加 retry。
+        """
+        start = (date.today() - relativedelta(months=TW_STOCK_MONTHS)).strftime("%Y-%m-%d")
+
+        hist = None
+        last_err: Optional[Exception] = None
+        for attempt in range(_YF_MAX_RETRIES):
             try:
-                rows = self._fetch_row_data(yyyymmdd)
-                if rows:
-                    self._save(rows)
-                time.sleep(TWSE_DELAY)
-            except Exception as e:
-                logging.warning(f"TWSE 0050 {yyyymmdd} 請求失敗：{e}，略過")
+                hist = yf.Ticker(_TICKER).history(start=start)
+                break
+            except Exception as exc:
+                last_err = exc
+                if attempt < _YF_MAX_RETRIES - 1:
+                    backoff = _YF_BACKOFF_SECONDS[attempt]
+                    logging.warning(
+                        f"yfinance {_TICKER} 第 {attempt + 1} 次失敗：{exc}；{backoff}s 後重試"
+                    )
+                    time.sleep(backoff)
 
-
-    def _build_month_list(self) -> list:
-        """
-        產生從「TWSE_MONTHS 個月前」到「本月」的月份清單。
-        格式：['20240101', '20240201', ..., '20250101']
-        TWSE API 的 date 參數只要該月任意一天，固定填 01 就好。
-        """
-        months = []
-        current = date.today().replace(day=1)# 強制設定為該月1號
-        for i in range(TWSE_MONTHS):
-            #relativedelta(months=i) 往前推 i 個月,format成YYYYMMDD
-            months.append((current - relativedelta(months=i)).strftime("%Y%m%d"))
-        return list(reversed(months))  # 從舊到新
-
-    def _fetch_row_data(self, yyyymmdd: str) -> list:
-        """
-        呼叫 TWSE API，回傳當月所有交易日的原始 row list。
-        API 回傳格式：
-          {
-            "stat": "OK",
-            "data": [
-              ["113/01/02", "...", "...", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "..."],
-              ...
-            ]
-          }
-        取用 index 0（日期）、6（收盤）、7（漲跌價差）。
-        每個欄位都是字串，數字含逗號（"1,234.56"），需要清洗。
-        """
-        params = {"response": "json", "date": yyyymmdd, "stockNo": _STOCK_NO}
-        response = get_with_retry(_API_URL, params=params, timeout=TWSE_TIMEOUT)
-        data = response.json()
-        if data.get("stat") != "OK":
-            logging.warning(f"TWSE 0050 {yyyymmdd} stat={data.get('stat')}，略過")
+        if hist is None:
+            logging.warning(f"yfinance {_TICKER} 連續 {_YF_MAX_RETRIES} 次失敗：{last_err}，本輪略過")
             return []
-        return data.get("data") or []
+
+        if hist.empty:
+            logging.warning(f"yfinance 回傳空資料：{_TICKER}")
+            return []
+
+        hist["change"] = (hist["Close"] - hist["Close"].shift(1)).round(2)
+
+        rows = []
+        for idx, row in hist.iterrows():
+            rows.append({
+                "trade_date": idx.date(),
+                "close":      round(float(row["Close"]), 2),
+                "change":     float(row["change"]) if not pd.isna(row["change"]) else None,
+            })
+        return rows
 
     def _save(self, rows: list) -> None:
-        """將一個月的交易資料寫入 stock_prices 表，重複的 trade_date 自動略過"""
+        """寫入 stock_prices，重複 trade_date 以新值覆蓋（保持 adjusted price 最新）"""
         with get_pg() as conn:
             with conn.cursor() as cur:
-                for row in rows:
-                    trade_date = self._parse_date(row[0])
-                    if not trade_date:
-                        continue
+                for row in tqdm(rows, desc=f"{_TICKER} 寫入", file=sys.stderr, leave=False):
                     cur.execute(f"""
                         INSERT INTO {STOCK_PRICES_TABLE}
                             (trade_date, close, change)
                         VALUES (%s, %s, %s)
-                        ON CONFLICT (trade_date) DO NOTHING
+                        ON CONFLICT (trade_date) DO UPDATE
+                            SET close = EXCLUDED.close,
+                                change = EXCLUDED.change
                     """, (
-                        trade_date,
-                        self._to_float(row[6]),  # 收盤價
-                        self._to_float(row[7]),  # 漲跌價差
+                        row["trade_date"],
+                        row["close"],
+                        row["change"],
                     ))
-
-    @staticmethod # 表示不需要用到self
-    def _parse_date(roc_date: str):
-        """
-        民國年轉西元 datetime.date。
-        TWSE 日期格式是民國年：'113/01/02' → 2024-01-02
-        """
-        try:
-            y, m, d = roc_date.split("/")
-            return date(int(y) + 1911, int(m), int(d))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _to_float(text: str):
-        """'1,234.56' → 1234.56，無法解析回傳 None"""
-        try:
-            return float(text.replace(",", ""))
-        except (ValueError, AttributeError):
-            return None

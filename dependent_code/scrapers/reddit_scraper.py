@@ -56,11 +56,12 @@ class RedditScraper(BaseScraper):
                     params=params,
                     headers=_HEADERS,
                 )
+                data = response.json().get("data", {})
             except Exception as e:
                 logging.warning(f"Reddit 第 {page_num + 1} 頁失敗：{e}，停止")
                 break
 
-            data = response.json().get("data", {})
+
             children = data.get("children", [])
             after = data.get("after")  # 下一頁 cursor
 

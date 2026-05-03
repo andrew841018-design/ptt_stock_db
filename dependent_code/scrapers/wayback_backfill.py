@@ -13,7 +13,7 @@ CNN / WSJ 的歷史文章，補足 RSS 無法回溯的長尾資料。
   - source 切換：__init__(source="cnn") 或 "wsj"，get_source_info() 回 wayback_cnn / wayback_wsj
 
 與其他爬蟲的分工：
-  - CnnScraper / WsjScraper：抓當下的 RSS + section 頁（近期文章）
+  - CnnScraper / WsjScraper：抓當下的 sitemap（近期文章）
   - WaybackBackfillScraper：補歷史（過去 N 年）
   - 兩者 URL 去重由 BaseScraper._is_duplicate() 統一處理
 """
@@ -24,11 +24,20 @@ import json
 import string
 import logging
 import requests
+import concurrent.futures
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from tqdm import tqdm
+
+# 與 pipeline.py extract() 同步的並行模式（ThreadPoolExecutor）
+# 2026-04-29 慘痛經驗：8 worker 把 Wayback IP-level throttle 觸發後，A (Session)
+# + B (jitter) 都救不回來 — TCP 握手在 server 端就被拒（並非 client 端問題）。
+# 觸發後要等 15-30 min IP cooldown。穩定上限是 4 worker fetch / 2 worker probe。
+_FETCH_WORKERS = 4           # Phase 2：snapshot HTTP fetch 並行數
+_PROBE_WORKERS = 2           # Phase 1：CDX slice probe 並行數
+_FETCH_CHUNK_SIZE = 50       # max_articles 的早停粒度
 
 from scrapers.base_scraper import BaseScraper
 from config import DEFAULT_HEADERS as _HEADERS
@@ -52,8 +61,13 @@ _TRACKING_QUERY_PARAMS = frozenset({
 _CDX_URL = "https://web.archive.org/cdx/search/cdx"
 _SNAPSHOT_TEMPLATE = "https://web.archive.org/web/{timestamp}id_/{url}"
 
-# 每個 slice（月+字首）最多拉 5000 筆（前次 15000 timeout）
-_CDX_ROWS_PER_SLICE = 5000
+# 每個 slice（月+字首）最多拉 1000 筆
+# （5000 仍常觸發 504；降到 1000 body 小 5x、response 更快；2026-04-19 修正）
+_CDX_ROWS_PER_SLICE = 1000
+
+# probe 階段每隔 N slice 輸出一次 logging.info 到 stdout，
+# 避免 tqdm 進度條只寫 stderr 導致 launchd 看不到進度
+_PROBE_LOG_EVERY = 10
 
 # HTTP timeout（Wayback 回應較慢，給 120 秒）
 _HTTP_TIMEOUT = 120
@@ -111,7 +125,124 @@ class WaybackBackfillScraper(BaseScraper):
     def get_source_info(self) -> dict:
         return {"name": self._source_name, "url": self._source_url}
 
-    # ── 主流程 ────────────────────────────────────────────────────
+    # ── Streaming write override ──────────────────────────────────────
+    # BaseScraper.run() 等 fetch_articles() 全跑完才一次寫 DB；wayback 經常被
+    # 6h timeout 砍掉，導致數小時抓的資料全丟。改成「每抓到 N 篇就 commit」，
+    # 即使中途被砍，已抓的部分都已落地。
+    _SAVE_BATCH = 25
+
+    def run(self) -> None:
+        """並行 fetch + serial save 模式（套用 pipeline.extract() 同款 ThreadPoolExecutor）。
+
+        架構：
+          - Phase 2 fetch_snapshot 是 I/O bound（HTTP 到 web.archive.org）→ 用 ThreadPoolExecutor
+          - DB cursor 不能跨 thread 共享 → save 仍 serial（main thread 從 future 結果取出再寫入）
+          - max_articles 早停：以 _FETCH_CHUNK_SIZE 為單位 submit / drain，每 chunk 完檢查是否達標
+        """
+        from pg_helper import get_pg
+        source = self.get_source_info()
+        logging.info(f"開始爬取：{source['name']}（並行 fetch + serial save，{_FETCH_WORKERS} workers）")
+
+        targets, known_urls = self._collect_targets()
+        if not targets:
+            logging.info(f"{self._source_name} 無新 URL 可抓")
+            return
+
+        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
+        saved = 0
+        total = len(targets)
+        with get_pg() as conn:
+            with conn.cursor() as cursor:
+                source_id = self._get_or_create_source(cursor, source['name'], source['url'])
+                pbar = tqdm(total=total, desc=f"{self._source_name} fetch+save", file=sys.stderr)
+                # 分 chunk submit，避免一次 submit 全部讓 max_articles 早停失靈
+                for i in range(0, total, _FETCH_CHUNK_SIZE):
+                    if self._max_articles is not None and saved >= self._max_articles:
+                        logging.info(f"{self._source_name} 達到 max_articles={self._max_articles}，停止")
+                        break
+                    chunk = targets[i:i + _FETCH_CHUNK_SIZE]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as ex:
+                        futures = {
+                            ex.submit(self._fetch_snapshot, ts, original_url): canonical
+                            for ts, original_url, canonical in chunk
+                        }
+                        for fut in concurrent.futures.as_completed(futures):
+                            canonical = futures[fut]
+                            pbar.update(1)
+                            try:
+                                article = fut.result()
+                            except Exception as e:
+                                logging.debug(f"{self._source_name} fetch 失敗 {canonical}: {e}")
+                                continue
+                            if not article:
+                                continue
+                            if self._is_duplicate(cursor, article['url']):
+                                continue
+                            if self._insert_article(cursor, source_id, article):
+                                saved += 1
+                                seen_canonical.add(canonical)
+                                if saved % self._SAVE_BATCH == 0:
+                                    conn.commit()
+                                    logging.info(f"{self._source_name} 已寫入 DB {saved} 篇")
+                conn.commit()
+                pbar.close()
+        logging.info(f"完成：{source['name']}，本次新增 {saved} 篇（parallel）")
+
+    def _collect_targets(self):
+        """Phase 1：CDX probe，回傳 (targets list, known_urls)。targets = [(timestamp, original_url, canonical), ...]"""
+        known_urls = self._load_urls()
+        logging.info(f"{self._source_name} 載入已知 URL：{len(known_urls)} 筆")
+
+        snapshots_by_canonical: dict = {}
+        slices = list(self._build_slices())
+        logging.info(f"{self._source_name} 共 {len(slices)} 個 CDX slice 待 probe")
+
+        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
+        new_url_count = 0
+        # Phase 1 並行：CDX probe 每個 slice 是獨立 HTTP query
+        # 用 ThreadPoolExecutor 並行 probe，主 thread 集中合併結果（dict 不能跨 thread 寫）
+        # 早停：每 chunk 完才檢查 new_url_count（保留原 1.2x buffer 邏輯）
+        pbar = tqdm(total=len(slices), desc=f"{self._source_name} CDX probe", file=sys.stderr)
+        idx = 0
+        for chunk_start in range(0, len(slices), _PROBE_WORKERS * 2):
+            chunk = slices[chunk_start:chunk_start + _PROBE_WORKERS * 2]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as ex:
+                futures = {ex.submit(self._probe_slice, prefix): prefix for prefix in chunk}
+                for fut in concurrent.futures.as_completed(futures):
+                    idx += 1
+                    pbar.update(1)
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        logging.warning(f"{self._source_name} probe slice 失敗 {futures[fut]}: {e}")
+                        continue
+                    for ts, url in result:
+                        canonical = self._canonicalize_url(url)
+                        existing = snapshots_by_canonical.get(canonical)
+                        if existing is None or ts < existing[0]:
+                            snapshots_by_canonical[canonical] = (ts, url)
+                            if canonical not in seen_canonical:
+                                new_url_count += 1
+                    if idx % _PROBE_LOG_EVERY == 0 or idx == len(slices):
+                        logging.info(
+                            f"{self._source_name} CDX slice {idx}/{len(slices)}, "
+                            f"累積 {len(snapshots_by_canonical)} 個唯一 URL（{new_url_count} 篇新）"
+                        )
+            # chunk 完才檢查早停（避免 chunk 中途 break 造成 thread leak）
+            if self._max_articles is not None and new_url_count >= int(self._max_articles * 1.2):
+                logging.info(f"{self._source_name} probe early stop at slice {idx}/{len(slices)}")
+                break
+        pbar.close()
+
+        targets = [
+            (ts, original_url, canonical)
+            for canonical, (ts, original_url) in snapshots_by_canonical.items()
+            if canonical not in seen_canonical
+        ]
+        logging.info(f"{self._source_name} 共發現 {len(targets)} 篇待抓")
+        return targets, known_urls
+
+    # ── 主流程（保留供測試 / backward compat） ────────────────────
     def fetch_articles(self) -> list:
         known_urls = self._load_urls()
         logging.info(f"{self._source_name} 載入已知 URL：{len(known_urls)} 筆")
@@ -122,7 +253,11 @@ class WaybackBackfillScraper(BaseScraper):
         slices = list(self._build_slices())
         logging.info(f"{self._source_name} 共 {len(slices)} 個 CDX slice 待 probe")
 
-        for prefix in tqdm(slices, desc=f"{self._source_name} CDX probe", file=sys.stderr):
+        # seen URLs（canonical）— probe 階段就用來判斷 early stop 條件
+        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
+        new_url_count = 0  # 累計尚未入庫的新 URL 數，達 max_articles 即可 break
+
+        for idx, prefix in enumerate(tqdm(slices, desc=f"{self._source_name} CDX probe", file=sys.stderr), start=1):
             slice_snapshots = self._probe_slice(prefix)
             for ts, url in slice_snapshots:
                 canonical = self._canonicalize_url(url)
@@ -131,14 +266,30 @@ class WaybackBackfillScraper(BaseScraper):
                 # original_url 保留「最早的那次」對應的版本，因為 Wayback 用它取 snapshot
                 if existing is None or ts < existing[0]:
                     snapshots_by_canonical[canonical] = (ts, url)
+                    if canonical not in seen_canonical:
+                        new_url_count += 1
+
+            # 每 N slice 輸出一次進度（launchd log 才看得到）
+            if idx % _PROBE_LOG_EVERY == 0 or idx == len(slices):
+                logging.info(
+                    f"{self._source_name} CDX slice {idx}/{len(slices)}, "
+                    f"累積 {len(snapshots_by_canonical)} 個唯一 URL（其中 {new_url_count} 篇新）"
+                )
+
+            # Early stop：湊夠 max_articles 的新 URL 就不用再 probe 剩下 slice
+            # 保險起見留 20% buffer（後續 _fetch_snapshot 可能失敗），實際抓時再依 max_articles cut
+            if self._max_articles is not None and new_url_count >= int(self._max_articles * 1.2):
+                logging.info(
+                    f"{self._source_name} probe early stop at slice {idx}/{len(slices)}: "
+                    f"new URL 已 {new_url_count} ≥ {int(self._max_articles * 1.2)}（max_articles × 1.2）"
+                )
+                break
 
         logging.info(f"{self._source_name} CDX 共發現 {len(snapshots_by_canonical)} 個唯一文章 URL")
 
         # 階段二：逐篇抓取 Wayback 快照並解析
-        # DB 裡的歷史 URL 可能是 canonicalize 之前的格式（http vs https 不一），
-        # 所以 seen set 同時收 canonical 版本，避免重複抓
+        # seen_canonical 已在 probe 階段初始化（early-stop 需要），此處沿用
         articles = []
-        seen_canonical = {self._canonicalize_url(u) for u in known_urls}
         targets = [
             (ts, original_url, canonical)
             for canonical, (ts, original_url) in snapshots_by_canonical.items()
@@ -486,4 +637,5 @@ class WaybackBackfillScraper(BaseScraper):
 # 手動執行請改用 cli.py：
 #   python cli.py wayback-backfill cnn --min-year 2015 --max-year 2023
 #   python cli.py wayback-backfill wsj --min-year 2022 --max-articles 500
-# 預設參數版本由 pipeline.py extract() 透過 _wayback_cnn_factory / _wayback_wsj_factory 呼叫
+# 排程執行由 launchd 每日 03:00 觸發（~/Library/LaunchAgents/com.andrew.wayback-backfill.plist）
+# 刻意不加入 pipeline.py 的 _ARTICLE_SOURCES，避免拖慢每小時 ETL

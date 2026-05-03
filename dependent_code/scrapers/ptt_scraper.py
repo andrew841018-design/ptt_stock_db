@@ -191,8 +191,8 @@ class PttScraper(BaseScraper):
         return {"content": "\n".join(lines), "comments": comments}
 
     @staticmethod
-    def _parse_push_count(text: str) -> int:
-        """PTT 推文數文字轉整數"""
+    def _parse_push_count(text: str) -> Optional[int]:
+        """PTT 推文數文字轉整數，無法解析時回傳 None"""
         text = text.strip()
         try:
             if text == "爆":      # 推文 >= 100
