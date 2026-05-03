@@ -2,12 +2,10 @@ import sys
 import logging
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 from typing import Optional
 from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
-from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES
 
 _SOURCE = SOURCES["cnyes"]
@@ -31,7 +29,8 @@ class CnyesScraper(BaseScraper):
       - content 為 HTML，需用 BeautifulSoup 轉純文字
     """
 
-    EARLY_STOP_PAGES = 3
+    # EARLY_STOP_PAGES 走 config（ptt / cnyes 共用）
+    from config import EARLY_STOP_EMPTY_PAGES as EARLY_STOP_PAGES
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -40,14 +39,34 @@ class CnyesScraper(BaseScraper):
         known_urls = self._load_urls()
         logging.info(f"鉅亨網載入已知 URL：{len(known_urls)} 筆")
 
+        # 多 category 爬（API 每個 category 只 index 最新 ~1000-2000 篇）
+        # 取代單一 tw_stock，覆蓋 ~3 倍量
+        categories = _SOURCE.get("categories", ["tw_stock"])
+        articles = []
+
+        for category in categories:
+            cat_articles = self._fetch_category(category, known_urls)
+            logging.info(f"鉅亨網 category={category}：爬到 {len(cat_articles)} 篇新文")
+            articles.extend(cat_articles)
+
+        logging.info(f"鉅亨網總計：{len(articles)} 篇新文（跨 {len(categories)} 個 category）")
+        return articles
+
+
+    def _fetch_category(self, category: str, known_urls: set) -> list:
+        """爬單一 category 所有頁，遇 EARLY_STOP_PAGES 連空頁停。"""
         articles = []
         consecutive_empty_pages = 0
 
-        for page_num in tqdm(range(1, _SOURCE["num_pages"] + 1), desc="鉅亨網爬蟲頁數", file=sys.stderr):
+        for page_num in tqdm(
+            range(1, _SOURCE["num_pages"] + 1),
+            desc=f"鉅亨網 {category}",
+            file=sys.stderr,
+        ):
             try:
-                items = self._fetch_news_list(page_num)
+                items = self._fetch_news_list(category, page_num)
                 if not items:
-                    logging.info("鉅亨網已無更多新聞，停止爬取")
+                    logging.info(f"鉅亨網 {category} 已無更多新聞（page {page_num}），停止")
                     break
 
                 page_articles = []
@@ -60,25 +79,25 @@ class CnyesScraper(BaseScraper):
                 if not page_articles:
                     consecutive_empty_pages += 1
                     if consecutive_empty_pages >= self.EARLY_STOP_PAGES:
-                        logging.info(f"鉅亨網連續 {consecutive_empty_pages} 頁無新文章，停止")
+                        logging.info(f"鉅亨網 {category} 連續 {consecutive_empty_pages} 頁無新文，停止")
                         break
                 else:
                     consecutive_empty_pages = 0
             except requests.RequestException as e:
-                logging.warning(f"鉅亨網第 {page_num} 頁請求失敗：{e}，略過")
+                logging.warning(f"鉅亨網 {category} 第 {page_num} 頁請求失敗：{e}，略過")
                 continue
 
         return articles
 
 
-    def _fetch_news_list(self, page: int) -> list:
+    def _fetch_news_list(self, category: str, page: int) -> list:
         """
         取得一頁新聞列表，回傳 items list。
         API 回傳格式：{"items": {"data": [...], "total": N, "per_page": N, ...}}
         """
         params = {"page": page, "limit": _SOURCE["page_size"]}
         response = self._get_with_retry(
-            f"{_API_BASE}/newslist/category/tw_stock",
+            f"{_API_BASE}/newslist/category/{category}",
             params=params,
         )
         data = response.json()
@@ -127,15 +146,12 @@ class CnyesScraper(BaseScraper):
             "content":      content,
             "url":          url,
             "author":       item.get("author"),          # 記者名稱，可能為 None
-            "published_at": datetime.utcfromtimestamp(
+            "published_at": self.ts_to_dt(
                                 item["publishAt"]        # 鉅亨網時間戳是秒，統一轉 UTC
                             ),
             "push_count":   None,  # 新聞無推文數
             "comments":     [],    # 新聞無留言
         }
-        try:
-            ArticleSchema(**article)
-        except Exception as e:
-            logging.warning(f"文章驗證失敗，略過 {article['url']}：{e}")
+        if not self.validate_article(article, "cnyes"):
             return None
         return article

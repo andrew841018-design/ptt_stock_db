@@ -9,7 +9,6 @@ from typing import Optional
 from tqdm import tqdm
 
 from scrapers.base_scraper import BaseScraper
-from scrapers.scraper_schemas import ArticleSchema
 from config import SOURCES, MAX_RETRY, REQUEST_DELAY
 SKIP_KEYWORDS = ["公告", "盤後閒聊", "盤中閒聊", "情報"]
 
@@ -27,7 +26,8 @@ class PttScraper(BaseScraper):
 
     PTT_BASE_URL = "https://www.ptt.cc"
     HEADERS = {"cookie": "over18=1"}  # PTT 需要 over18 cookie 才能瀏覽
-    EARLY_STOP_PAGES = 3  # 連續 N 頁全為已知文章就停止
+    # EARLY_STOP_PAGES 走 config（ptt / cnyes 共用）；若要 PTT 專屬覆蓋，改指定數字即可
+    from config import EARLY_STOP_EMPTY_PAGES as EARLY_STOP_PAGES
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -136,10 +136,7 @@ class PttScraper(BaseScraper):
             "push_count":   self._parse_push_count(push_txt),
             "comments":     content_data["comments"],
         }
-        try:
-            ArticleSchema(**article)
-        except Exception as e:
-            logging.warning(f"文章驗證失敗，略過 {article_url}：{e}")
+        if not self.validate_article(article, "PTT"):
             return None
         return article
 
@@ -214,5 +211,5 @@ class PttScraper(BaseScraper):
         """從 PTT 文章 URL 的 Unix timestamp 提取發文時間"""
         match = re.search(r'M\.(\d+)\.', url)
         if match:
-            return datetime.utcfromtimestamp(int(match.group(1)))  # group(1) = 第一個括號內容
+            return BaseScraper.ts_to_dt(int(match.group(1)))  # staticmethod 無 self，直接走 class
         return None
