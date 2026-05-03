@@ -16,7 +16,6 @@ from bert_sentiment import run_batch_inference
 from fetch_etf_holdings import run as run_fetch_etf
 from stock_matcher import run_matcher
 from dw_etl import run_etl
-from looker_export import main as run_looker_export
 from backup import backup_database
 from ai_model_prediction import run_ai_model_prediction
 from mongo_helper import ensure_indexes
@@ -136,19 +135,13 @@ def run_pipeline() -> None:
     # Step 6：DW ETL（建表 → 填維度 → 填事實 → 刷新 Data Mart）
     run_etl()
 
-    # Step 7：匯出 CSV 給 Looker Studio
-    try:
-        run_looker_export()
-    except Exception as e:
-        logging.warning(f"[Looker] 失敗（不中止 pipeline）：{e}")
-
-    # Step 8：S3 備份（最後一步，備份完整狀態）
+    # Step 7：S3 備份（最後一步，備份完整狀態）
     try:
         backup_database()
     except Exception as e:
         logging.warning(f"[Backup] 失敗（不中止 pipeline）：{e}")
 
-    # Step 9：AI 模型預測（情緒 vs 隔日漲跌，Walk-Forward Validation）
+    # Step 8：AI 模型預測（情緒 vs 隔日漲跌，Walk-Forward Validation）
     try:
         run_ai_model_prediction("tw")
         run_ai_model_prediction("us")

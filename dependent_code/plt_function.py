@@ -27,14 +27,15 @@ def plot_sentiment_trend(df: pd.DataFrame) -> plt.Figure:
     return fig
 def plot_push_count_distribution(df: pd.DataFrame) -> plt.Figure:
     """
-    推文數分桶 × 情緒分數 box plot。
+    各推文數區間的「正向文章比例」橫條圖。
 
-    為什麼不用 scatter：171k 個點全疊在 [-100, 100] × [-1, 1] 的小區塊裡，
-    會糊成一片色塊看不出任何訊號。分桶後直接比較各桶的情緒中位數，可以回答
-    核心問題——「推文數越高的文章，情緒是否越正向？」
-
-    分桶邏輯（貼近 PTT 文化 + Reddit 正規化後 -100~100）：
-        噓文(<0) / 冷門(0) / 低推(1-9) / 中推(10-49) / 高推(≥50)
+    設計演進（越改越簡單）：
+    - v1 scatter：171k 點糊成色塊
+    - v2 box plot：需要統計素養（看 median/IQR）
+    - v3 100% stacked bar：三色並列仍要比對
+    - v4（此版）一個桶子 = 一個數字「這區間有幾 % 文章是正向的」
+      非技術背景的人一眼就能回答「哪種推文數的文章最正向」。
+      長條越長越正向、紅色 < 50% / 綠色 ≥ 50%。
     """
     df = df.dropna(subset=['Push_count', 'Article_Sentiment_Score']).copy()
     fig, ax = plt.subplots()
@@ -42,39 +43,43 @@ def plot_push_count_distribution(df: pd.DataFrame) -> plt.Figure:
         ax.text(0.5, 0.5, '無資料', ha='center', va='center', transform=ax.transAxes)
         return fig
 
-    bins   = [-101, -1, 0, 10, 50, 101]
-    labels = ['噓文(<0)', '冷門(0)', '低推(1-9)', '中推(10-49)', '高推(≥50)']
-    df['push_bucket'] = pd.cut(df['Push_count'], bins=bins, labels=labels, include_lowest=True)
+    push_bins   = [-101, -1, 0, 10, 50, 101]
+    push_labels = ['噓文 (<0)', '冷門 (0 推)', '低推 (1-9 推)', '中推 (10-49 推)', '高推 (≥50 推)']
+    df['push_bucket'] = pd.cut(df['Push_count'], bins=push_bins,
+                               labels=push_labels, include_lowest=True)
+    # 正向 = 情緒分數 > 0.05（跟 VADER 慣例一致）
+    df['is_positive'] = df['Article_Sentiment_Score'] > 0.05
 
-    grouped = [df.loc[df['push_bucket'] == lbl, 'Article_Sentiment_Score'].values
-               for lbl in labels]
-    counts  = [len(bucket) for bucket in grouped]
+    pos_ratio = df.groupby('push_bucket', observed=True)['is_positive'].mean() * 100
+    pos_ratio = pos_ratio.reindex(push_labels)
+    counts    = df['push_bucket'].value_counts().reindex(push_labels)
 
-    bp = ax.boxplot(
-        grouped,
-        tick_labels=labels,                                  # matplotlib 3.9+ API，3.11 將移除舊的 labels=
-        showfliers=False,                                    # outlier 點太多反而蓋掉 box，關掉
-        patch_artist=True,
-        medianprops={'color': 'red', 'linewidth': 2},
-    )
+    # 單一 threshold 配色：≥50% 綠、<50% 紅，方便「及格 / 不及格」直覺判讀
+    colors = ['#5cb85c' if p >= 50 else '#d9534f' for p in pos_ratio.values]
 
-    # 噓文紅 → 爆文綠的漸層，語意化顏色
-    colors = ['#d9534f', '#6c757d', '#f0ad4e', '#5bc0de', '#5cb85c']
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.75)
+    y = range(len(push_labels))
+    ax.barh(y, pos_ratio.values, color=colors, edgecolor='white', height=0.65)
 
-    ax.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
-    ax.set_xlabel('推文數區間')
-    ax.set_ylabel('情緒分數')
-    ax.set_title(f'各推文數區間的情緒分數分布（n={len(df):,}）')
+    # 每條右邊寫大大的百分比
+    for i, val in enumerate(pos_ratio.values):
+        ax.text(val + 1, i, f'{val:.0f}%', va='center',
+                fontsize=16, fontweight='bold')
 
-    # 每個桶下緣標註樣本數
-    y_lo, y_hi = ax.get_ylim()
-    for idx, count in enumerate(counts, start=1):
-        ax.text(idx, y_lo + (y_hi - y_lo) * 0.02, f'n={count:,}',
-                ha='center', va='bottom', fontsize=9, color='dimgray')
+    # y 軸：推文桶 + 樣本數註記
+    ylabels = [f'{lbl}\n({cnt:,} 篇)' for lbl, cnt in zip(push_labels, counts)]
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(ylabels)
+    ax.invert_yaxis()                          # 噓文在上、高推在下（由冷到熱）
+    ax.set_xlim(0, 100)
+    ax.set_xlabel('正向文章比例 (%)')
+    ax.set_title('哪種推文數的文章最「正向」？')
 
+    # 50% 基準線：一眼看出哪些桶及格
+    ax.axvline(x=50, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    fig.tight_layout()
     return fig
 def plot_daily_article_count(df: pd.DataFrame) -> plt.Figure:
     """group by date and count the number of articles"""

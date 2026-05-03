@@ -57,7 +57,9 @@ jobs:
             cd /home/ubuntu/ptt_stock_db/dependent_code
             set -a && source ../.env && set +a
             /home/ubuntu/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000 > /home/ubuntu/api.log 2>&1 &
-            /home/ubuntu/venv/bin/streamlit run visualization.py --server.port 8501 --server.address 0.0.0.0 --server.headless true > /home/ubuntu/streamlit.log 2>&1 &
+            # --server.fileWatcherType none：關閉 hot-reload watcher。production 不需要，
+            # 留著它會在啟動時掃描 transformers 整個 module tree → idle 就吃 1.2 GB。
+            /home/ubuntu/venv/bin/streamlit run visualization.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --server.fileWatcherType none > /home/ubuntu/streamlit.log 2>&1 &
             EOS
             chmod +x /home/ubuntu/start_services.sh
             setsid /home/ubuntu/start_services.sh < /dev/null > /dev/null 2>&1 &

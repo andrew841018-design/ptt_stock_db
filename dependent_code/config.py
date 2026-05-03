@@ -20,13 +20,6 @@ PG_API_CONFIG = {
     "password": os.environ.get("PG_API_PASSWORD", ""),
 }
 
-# PostgreSQL ETL read-write role (Pipeline, INSERT/UPDATE/DELETE)
-PG_ETL_CONFIG = {
-    **PG_CONFIG,
-    "user":     os.environ.get("PG_ETL_USER",     "etl_user"),
-    "password": os.environ.get("PG_ETL_PASSWORD", ""),
-}
-
 # JWT authentication
 JWT_SECRET_KEY     = os.environ.get("JWT_SECRET_KEY",     "change-me-in-production")
 JWT_ALGORITHM      = os.environ.get("JWT_ALGORITHM",      "HS256")

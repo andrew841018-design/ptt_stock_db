@@ -31,11 +31,17 @@ class CnyesScraper(BaseScraper):
       - content 為 HTML，需用 BeautifulSoup 轉純文字
     """
 
+    EARLY_STOP_PAGES = 3
+
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
 
     def fetch_articles(self) -> list:
+        known_urls = self._load_urls()
+        logging.info(f"鉅亨網載入已知 URL：{len(known_urls)} 筆")
+
         articles = []
+        consecutive_empty_pages = 0
 
         for page_num in tqdm(range(1, _SOURCE["num_pages"] + 1), desc="鉅亨網爬蟲頁數", file=sys.stderr):
             try:
@@ -43,10 +49,21 @@ class CnyesScraper(BaseScraper):
                 if not items:
                     logging.info("鉅亨網已無更多新聞，停止爬取")
                     break
+
+                page_articles = []
                 for item in items:
-                    article = self._parse_news_item(item)
+                    article = self._parse_news_item(item, known_urls)
                     if article:
-                        articles.append(article)
+                        page_articles.append(article)
+                articles.extend(page_articles)
+
+                if not page_articles:
+                    consecutive_empty_pages += 1
+                    if consecutive_empty_pages >= self.EARLY_STOP_PAGES:
+                        logging.info(f"鉅亨網連續 {consecutive_empty_pages} 頁無新文章，停止")
+                        break
+                else:
+                    consecutive_empty_pages = 0
             except requests.RequestException as e:
                 logging.warning(f"鉅亨網第 {page_num} 頁請求失敗：{e}，略過")
                 continue
@@ -67,7 +84,7 @@ class CnyesScraper(BaseScraper):
         data = response.json()
         return data.get("items", {}).get("data", [])
 
-    def _parse_news_item(self, item: dict) -> Optional[dict]:
+    def _parse_news_item(self, item: dict, known_urls: set) -> Optional[dict]:
         """
         將 API 回傳的單筆新聞轉成標準格式。
         content 是 HTML，用 BeautifulSoup 取純文字。
@@ -89,9 +106,16 @@ class CnyesScraper(BaseScraper):
           fbComment    int     FB 留言數
         """
         news_id      = item.get("newsId")
+        if not news_id:
+            return None
+
+        url = f"https://news.cnyes.com/news/id/{news_id}"
+        if url in known_urls:
+            return None
+
         html_content = item.get("content") or item.get("summary", "")
         publish_at   = item.get("publishAt")
-        if not news_id or not html_content or not publish_at:
+        if not html_content or not publish_at:
             return None
 
         # HTML → 純文字
@@ -101,7 +125,7 @@ class CnyesScraper(BaseScraper):
         article = {
             "title":        (item.get("title") or "").strip(),
             "content":      content,
-            "url":          f"https://news.cnyes.com/news/id/{news_id}",
+            "url":          url,
             "author":       item.get("author"),          # 記者名稱，可能為 None
             "published_at": datetime.utcfromtimestamp(
                                 item["publishAt"]        # 鉅亨網時間戳是秒，統一轉 UTC

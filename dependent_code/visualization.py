@@ -74,37 +74,39 @@ st.metric(label="Today's Sentiment Score", value=score, delta=change_score)
 st.subheader("Today's Top 10 Trending Articles")  # 顯示今日前10名熱門文章
 st.dataframe(df.nlargest(10, 'Push_count')[['Title', 'Push_count', 'Article_Sentiment_Score', 'Date']])
 
-@st.cache_resource
-def _kw_model():
-    # Lazy import：只在使用者點開關鍵字分析時才載 BERT 模型（~500MB）
-    from keybert import KeyBERT
-    from keybert.backend._sentencetransformers import SentenceTransformerBackend
-
-    # 相容性補丁：sentence-transformers 5.4+ 會把 numpy string array 誤判成
-    # 'audio' modality 拋 ValueError。KeyBERT 內部呼叫 sklearn
-    # CountVectorizer.get_feature_names_out() 拿 candidates，而它回傳的正是
-    # ndarray → 一進 encode() 就爆。這裡強制 list() 轉回純 Python list 繞過。
-    # 可追蹤 keybert issue：等 KeyBERT 官方 pin sentence-transformers<5 或修復後移除。
-    _raw_embed = SentenceTransformerBackend.embed
-
-    def _patched_embed(self, documents, verbose: bool = False):
-        return _raw_embed(self, list(documents), verbose=verbose)
-
-    SentenceTransformerBackend.embed = _patched_embed
-    return KeyBERT()
-
-# 關鍵字統計 TOP20（KeyBERT）
-# 限制輸入量至 push_count 最高的 200 篇，避免在 t3.small 爆 OOM
+# 關鍵字統計 TOP20（TF-IDF 版）
+#
+# 為什麼不用 KeyBERT：
+# - t3.small 只有 1.9 GB RAM，Streamlit 起來已吃 1.2 GB（watcher 掃 transformers
+#   module tree），再載 BERT (~500 MB) 會直接 swap 地獄或被 OOM killer 殺掉。
+# - TF-IDF 對「標題短文」的關鍵字抽取效果跟 BERT 差距很小（標題本來就
+#   高度濃縮），但記憶體用 ~30 MB、毫秒內完成。
+# - sklearn 已經是 requirements 的 transitive dep，零新依賴。
 _KEYWORD_MAX_DOCS = 200
+
+def _extract_keywords_tfidf(titles: list[str], top_n: int = 20) -> pd.DataFrame:
+    """用 TF-IDF 從標題抽關鍵字（1-2 gram）。回傳 Word/Score DataFrame。"""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    # token_pattern 改為「至少 2 個非空白字元」以支援中文單字
+    vec = TfidfVectorizer(
+        ngram_range=(1, 2),
+        token_pattern=r"(?u)\b\w{2,}\b",
+        max_features=2000,
+    )
+    matrix = vec.fit_transform(titles)
+    # 全部文件的 TF-IDF 加總 = 該詞在語料中的總重要度
+    scores = matrix.sum(axis=0).A1
+    vocab  = vec.get_feature_names_out()
+    top_idx = scores.argsort()[::-1][:top_n]
+    return pd.DataFrame({'Word': vocab[top_idx], 'Score': scores[top_idx].round(3)})
 
 st.subheader("Top 20 Keywords")
 if df.empty:
     st.warning("No data available for keyword analysis")
-elif st.button(f"載入 KeyBERT 分析（取 top {_KEYWORD_MAX_DOCS} 熱門文章）"):
-    sample       = df.nlargest(_KEYWORD_MAX_DOCS, 'Push_count') if len(df) > _KEYWORD_MAX_DOCS else df
-    text         = ' '.join(sample['Title'].tolist())
-    keywords     = _kw_model().extract_keywords(text, keyphrase_ngram_range=(1, 2), top_n=20)
-    top_20_words = pd.DataFrame(keywords, columns=['Word', 'Score'])
+elif st.button(f"載入關鍵字分析（取 top {_KEYWORD_MAX_DOCS} 熱門文章）"):
+    with st.spinner("計算中..."):
+        sample = df.nlargest(_KEYWORD_MAX_DOCS, 'Push_count') if len(df) > _KEYWORD_MAX_DOCS else df
+        top_20_words = _extract_keywords_tfidf(sample['Title'].tolist(), top_n=20)
     st.dataframe(top_20_words)
 
 st.subheader("情緒 vs 股價關聯分析")

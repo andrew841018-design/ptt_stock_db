@@ -5,8 +5,7 @@ BERT 情緒分析完整流程（Phase 5）
   1. load_labeled_data()   - 從 article_labels + articles 載入標注資料
   2. train()               - fine-tune（AdamW lr=2e-5, epochs=3）
   3. evaluate()            - F1-score + Confusion Matrix
-  4. predict()             - 對新文章推論（fine-tuned 或 zero-shot fallback）
-  5. run_batch_inference() - 批次為所有文章填入 sentiment_scores
+  4. run_batch_inference() - 批次為所有文章填入 sentiment_scores
 
 模型儲存路徑：dependent_code/models/sentiment_bert/
 """
@@ -17,8 +16,6 @@ import sys
 import warnings
 from typing import Optional
 
-import numpy as np
-import psycopg2
 import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import (
@@ -28,7 +25,7 @@ from transformers import (
 )
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import PG_CONFIG, SENTIMENT_SCORES_TABLE, ARTICLES_TABLE, ARTICLE_LABELS_TABLE
+from config import SENTIMENT_SCORES_TABLE, ARTICLES_TABLE, ARTICLE_LABELS_TABLE
 
 BERT_MODEL = "lxyuan/distilbert-base-multilingual-cased-sentiments-student"
 from pg_helper import get_pg
@@ -42,7 +39,6 @@ LABEL_MAP     = {"negative": 0, "neutral": 1, "positive": 2}
 ID_TO_LABEL   = {id_: label for label, id_ in LABEL_MAP.items()}
 MODEL_DIR     = os.path.join(os.path.dirname(__file__), "models", "sentiment_bert")
 MIN_SAMPLES   = 50    # 低於此數直接用 zero-shot，不 fine-tune
-TARGET_LABELS = 500   # 目標標注數
 MAX_LEN       = 256
 BATCH_SIZE    = 16
 EPOCHS        = 3
@@ -255,39 +251,6 @@ def _load_model_and_tokenizer():
     return model, tokenizer
 
 
-def predict(texts: list[str]) -> list[dict]:
-    """
-    對文章清單推論情緒
-    回傳：[{"label": "positive"|"neutral"|"negative", "score": float}, ...]
-    """
-    model, tokenizer = _load_model_and_tokenizer()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    results = []
-    # 分 batch 推論，避免 OOM
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch_texts = [text[:1000] for text in texts[i: i + BATCH_SIZE]]
-        encodings = tokenizer(
-            batch_texts,
-            max_length=MAX_LEN,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        encodings = {key: tensor.to(device) for key, tensor in encodings.items()}
-        with torch.no_grad():
-            logits = model(**encodings).logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        for prob in probs:
-            label_id = int(np.argmax(prob))
-            # score: positive=+1, neutral=0, negative=-1，加權平均
-            score = float(prob[2] - prob[0])   # P(positive) - P(negative)
-            results.append({"label": ID_TO_LABEL[label_id], "score": round(score, 4)})
-
-    return results
-
-
 # ─── 批次推論入庫 ──────────────────────────────────────────────────────────────
 
 def run_batch_inference(batch_size: int = 500) -> None:
@@ -350,8 +313,7 @@ def run_batch_inference(batch_size: int = 500) -> None:
         scores = [float(prob[2] - prob[0]) for prob in probs]   # P(pos) - P(neg)
 
         # 即時寫入 DB（每批獨立 commit）
-        conn = psycopg2.connect(**PG_CONFIG)
-        try:
+        with get_pg() as conn:
             with conn.cursor() as cur:
                 cur.executemany(
                     f"""
@@ -361,13 +323,6 @@ def run_batch_inference(batch_size: int = 500) -> None:
                     """,
                     zip(ids, scores),
                 )
-            conn.commit()
-        except psycopg2.Error as e:
-            conn.rollback()
-            logging.error("[BERT] 寫入失敗：%s", e)
-            raise
-        finally:
-            conn.close()
 
         processed += len(rows)
         logging.info("[BERT] 推論進度：%d / %d", processed, total)

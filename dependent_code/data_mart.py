@@ -56,7 +56,6 @@ def refresh_mart_daily_summary() -> int:
                 GROUP BY f.fact_date, f.source_name
             """)
             count = cur.rowcount
-        conn.commit()
     logging.info("[DataMart] mart_daily_summary 刷新完成，%d 筆", count)
     return count
 
@@ -67,7 +66,6 @@ def refresh_mart_hot_stocks() -> int:
     """
     熱門股票刷新：TRUNCATE + INSERT FROM DW。
     只保留有推文互動的資料（avg_push_count > 0）。
-    Partial index idx_hot 對 push_count > 100 的查詢特別快。
     供 API /articles/top_push 端點直接查。
     回傳：寫入筆數
     """
@@ -86,30 +84,11 @@ def refresh_mart_hot_stocks() -> int:
                 WHERE f.avg_push_count > 0
             """)
             count = cur.rowcount
-        conn.commit()
     logging.info("[DataMart] mart_hot_stocks 刷新完成，%d 筆", count)
     return count
 
 
 # ─── 查詢介面（供 API / Dashboard 呼叫）──────────────────────────────────────
-
-def get_daily_summary(days: int = 30) -> list[dict]:
-    """
-    取近 N 天的每日情緒摘要（按來源分群）。
-    直接查 mart_daily_summary，速度遠快於掃 fact_sentiment。
-    """
-    with get_pg() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT summary_date, source_name,
-                       total_articles, avg_sentiment, avg_push_count
-                FROM mart_daily_summary
-                WHERE summary_date >= CURRENT_DATE - INTERVAL '%s days'
-                ORDER BY summary_date DESC, source_name
-            """, (days,))
-            cols = [desc[0] for desc in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
 
 def get_daily_sentiment(days: int) -> list[dict]:
     """
@@ -131,24 +110,6 @@ def get_daily_sentiment(days: int) -> list[dict]:
                 GROUP BY summary_date
                 ORDER BY summary_date DESC
             """, (days,))
-            cols = [desc[0] for desc in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def get_hot_stocks_from_mart(min_push: int = 100, limit: int = 20) -> list[dict]:
-    """
-    取熱門股票排行（push_count > min_push）。
-    Partial index idx_hot 在 min_push >= 100 時自動生效，查詢極快。
-    """
-    with get_pg() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT report_date, source_name, push_count, article_count
-                FROM mart_hot_stocks
-                WHERE push_count > %s
-                ORDER BY push_count DESC
-                LIMIT %s
-            """, (min_push, limit))
             cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 

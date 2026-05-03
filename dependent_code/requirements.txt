@@ -28,3 +28,5 @@ pyarrow
 gspread
 python-jose[cryptography]
 mlflow
+lxml
+numpy

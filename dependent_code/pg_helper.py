@@ -1,6 +1,6 @@
 import psycopg2
 from contextlib import contextmanager
-from config import PG_CONFIG, PG_API_CONFIG, PG_ETL_CONFIG
+from config import PG_CONFIG, PG_API_CONFIG
 
 @contextmanager
 def get_pg(config=None):
@@ -24,15 +24,3 @@ def get_pg_readonly():
     finally:
         conn.close()
 
-@contextmanager
-def get_pg_etl():
-    """ETL 讀寫連線（etl_user，有 INSERT/UPDATE/DELETE 權限）"""
-    conn = psycopg2.connect(**PG_ETL_CONFIG)
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
