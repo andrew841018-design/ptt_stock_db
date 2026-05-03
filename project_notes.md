@@ -464,7 +464,11 @@ def get_db():
 
 - SSH 啟動 uvicorn 後不結束 → 用 `setsid nohup ... > /dev/null 2>&1 &`
 - pytest 無真實 DB → `unittest.mock.patch` 注入假資料
-- patch 要 patch「使用者的命名空間」：`patch("api.func")` ✅
+- patch 要 patch「使用者的命名空間（import 後）」：`patch("api.get_daily_sentiment")` ✅，不是 `patch("data_mart.get_daily_sentiment")` ❌
+- **重構搬函式時，測試 mock 要同步跟著搬**：否則 pytest 悄悄連真實 DB — CI 無 DB 會 fail、本機有 DB 會 false pass（最難抓的那種）
+- **`continue-on-error: true` 陷阱**：step 失敗不影響 job 狀態 → deploy step 顯示綠燈但實際整個爆；production deploy step 絕對不能開，只有「預期可能失敗且不影響後續」的實驗性 step 才用
+- **`git pull` 在 deploy script 裡是地雷**：遇到 divergent branches 會直接 fail 並要求選 merge strategy；正確做法 `git fetch && git reset --hard origin/main`（deploy 永遠追 remote，不保留 local 改動）
+- **Git 歷史無共同祖先**：`git merge-base A B` 回傳空 → 兩條 branch 完全獨立發展，硬 merge 會地獄；正確解法是選定主幹 `git reset --hard`
 
 ### Shell 重導向
 

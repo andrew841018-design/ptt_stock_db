@@ -35,20 +35,37 @@ jobs:
     steps:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@master
-        continue-on-error: true
         with:
           host: ${{ secrets.EC2_IP }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/ptt_stock_db
-            source venv/bin/activate
-            git pull
-            pkill -f "uvicorn api:app" || true
-            pkill -f "streamlit run visualization" || true
-            # 1代表stdout, 2代表stderr,>代表重導向
-            # 當>前面沒東西時，預設為1
-            # >/dev/null 2>&1 & => 輸出導向空白(null)，錯誤導向輸出導向空白(null)
-            # 簡單講=>都不印出
-            cd /home/ubuntu/ptt_stock_db/dependent_code && nohup uvicorn api:app --host 0.0.0.0 --port 8000 > /dev/null 2>&1 &
-            cd /home/ubuntu/ptt_stock_db && nohup streamlit run dependent_code/visualization.py --server.port 8501 --server.address 0.0.0.0 > /dev/null 2>&1 &
+            # 強制 reset 到 origin/main，避免 divergent history 卡住
+            git fetch origin
+            git reset --hard origin/main
+            # 不能用 pkill -f「uvicorn」因為 drone-ssh 的 shell argv 含腳本全文，
+            # pkill -f 會匹配自己導致 SIGTERM 143。改用 lsof -ti 依 port 找 PID。
+            lsof -ti tcp:8000 2>/dev/null | xargs -r kill 2>/dev/null || true
+            lsof -ti tcp:8501 2>/dev/null | xargs -r kill 2>/dev/null || true
+            sleep 2
+            # deploy script 寫在 EC2 上，SSH session 只負責觸發，服務 fd 全部重導向，
+            # 不會被 SSH session 結束連帶殺掉
+            cat > /home/ubuntu/start_services.sh <<'EOS'
+            #!/bin/bash
+            cd /home/ubuntu/ptt_stock_db/dependent_code
+            set -a && source ../.env && set +a
+            /home/ubuntu/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000 > /home/ubuntu/api.log 2>&1 &
+            /home/ubuntu/venv/bin/streamlit run visualization.py --server.port 8501 --server.address 0.0.0.0 --server.headless true > /home/ubuntu/streamlit.log 2>&1 &
+            EOS
+            chmod +x /home/ubuntu/start_services.sh
+            setsid /home/ubuntu/start_services.sh < /dev/null > /dev/null 2>&1 &
+            sleep 3
+            exit 0
+
+      - name: Health check
+        run: |
+          sleep 15
+          curl -fsS --max-time 10 http://${{ secrets.EC2_IP }}:8000/health
+          curl -fsS --max-time 10 -o /dev/null http://${{ secrets.EC2_IP }}:8501/
