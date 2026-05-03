@@ -4,7 +4,7 @@ reparse.py — 資料修復管線
 流程：
   1. diagnose()  掃 PostgreSQL，找出有 NULL 關鍵欄位的文章
   2. 用 URL 從 MongoDB raw_responses 取回原始 HTTP 回應
-  3. 依來源（ptt / cnyes / reddit）re-parse 出正確值
+  3. 依來源 re-parse 出正確值（支援所有來源；新增來源見 _REPARSERS + _HTML_CONTENT_SELECTORS）
   4. UPDATE PostgreSQL（只更新非 None 的欄位，不覆蓋好資料）
   5. 回傳 {"repaired": N}
 
@@ -30,6 +30,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # 每次最多修復的筆數（避免一次佔用太多資源）
 _BATCH_SIZE = 500
+
+# ─── 通用 HTML 新聞 re-parse 設定 ──────────────────────────────────────
+# 來源 → 內文容器 CSS 選擇器（依優先順序嘗試，第一個命中就用）
+# 新增 HTML 新聞來源：加一筆 entry 到這裡 + 一行到 _REPARSERS
+_HTML_CONTENT_SELECTORS = {
+    "cnn": [
+        "div.article__content",
+        "div.zn-body__paragraph",
+        "section.body-text",
+    ],
+    "wsj": [
+        "div.article-content",
+        "div.wsj-snippet-body",
+        "section[data-testid='article-body']",
+    ],
+    "marketwatch": [
+        "div.article__body",
+        "div#js-article__body",
+        "div[data-testid='article-body']",
+        "div.body",
+    ],
+}
 
 
 def diagnose() -> list[dict]:
@@ -230,6 +252,116 @@ def _reparse_reddit(raw_doc: dict, url: str) -> Optional[dict]:
     return result or None
 
 
+def _parse_iso_datetime(date_str: str) -> Optional[datetime]:
+    """解析 ISO 8601 日期字串，回傳 datetime；失敗回傳 None。"""
+    if not date_str:
+        return None
+    formats = [
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[dict]:
+    """
+    通用 HTML 新聞文章 re-parse（CNN / WSJ / MarketWatch 等共用）。
+    從 MongoDB raw_html 重新解析 title / content / published_at。
+
+    新增 HTML 新聞來源只需在 _HTML_CONTENT_SELECTORS 加 CSS 選擇器。
+    """
+    raw_html = raw_doc.get("raw_html")
+    if not raw_html:
+        return None
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+
+    # ── content：依 CSS 選擇器優先順序找容器 ──
+    selectors = _HTML_CONTENT_SELECTORS.get(source_name, [])
+    paragraphs = []
+    for selector in selectors:
+        container = soup.select_one(selector)
+        if container:
+            paragraphs = container.find_all("p")
+            break
+    if not paragraphs:
+        article_tag = soup.find("article")
+        if article_tag:
+            paragraphs = article_tag.find_all("p")
+
+    content = "\n".join(
+        p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)
+    )
+    content = content if content else None
+
+    # ── title：og:title → <h1> ──
+    title = None
+    og_title = soup.find("meta", property="og:title")
+    if og_title:
+        title = (og_title.get("content") or "").strip()
+    if not title:
+        h1 = soup.find("h1")
+        if h1:
+            title = h1.get_text(strip=True)
+    title = title or None
+
+    # ── published_at：meta tag → JSON-LD ──
+    published_at = None
+    for attr in ("property", "name"):
+        for meta_name in ("article:published_time", "publishdate", "datePublished"):
+            meta = soup.find("meta", attrs={attr: meta_name})
+            if meta and meta.get("content"):
+                published_at = _parse_iso_datetime(meta["content"])
+                if published_at:
+                    break
+        if published_at:
+            break
+
+    if not published_at:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                ld = json.loads(script.string)
+                date_str = ld.get("datePublished") or ld.get("dateCreated")
+                if date_str:
+                    published_at = _parse_iso_datetime(date_str)
+                    if published_at:
+                        break
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                continue
+
+    result = {}
+    if title:
+        result["title"] = title
+    if content:
+        result["content"] = content
+    if published_at:
+        result["published_at"] = published_at
+    return result or None
+
+
+# ─── re-parser 註冊表 ─────────────────────────────────────────────────
+# 新增來源：
+#   HTML 新聞站 → 在 _HTML_CONTENT_SELECTORS 加 CSS 選擇器，再在這裡加一行 lambda
+#   特殊格式   → 寫一個 _reparse_xxx(raw_doc, url) 函式，在這裡加一行
+_REPARSERS = {
+    "ptt":         _reparse_ptt,
+    "cnyes":       _reparse_cnyes,
+    "reddit":      _reparse_reddit,
+    "cnn":         lambda doc, url: _reparse_html_news(doc, url, "cnn"),
+    "wsj":         lambda doc, url: _reparse_html_news(doc, url, "wsj"),
+    "marketwatch": lambda doc, url: _reparse_html_news(doc, url, "marketwatch"),
+}
+
+
 def _update_article(article_id: int, fields: dict) -> None:
     """UPDATE articles 表，只更新 fields 中非 None 的欄位"""
     if not fields:
@@ -278,15 +410,11 @@ def repair() -> dict:
                 logging.debug("[reparse] MongoDB 無 raw：%s", url)
                 continue
 
-            if source_name == "ptt":
-                fields = _reparse_ptt(raw_doc, url)
-            elif source_name == "cnyes":
-                fields = _reparse_cnyes(raw_doc, url)
-            elif source_name == "reddit":
-                fields = _reparse_reddit(raw_doc, url)
-            else:
+            reparser = _REPARSERS.get(source_name)
+            if not reparser:
                 logging.debug("[reparse] 不支援來源 %s 的 re-parse", source_name)
                 continue
+            fields = reparser(raw_doc, url)
 
             if not fields:
                 logging.debug("[reparse] re-parse 結果為空：%s", url)

@@ -2,8 +2,7 @@
 Data Mart（Phase 4）
 
 Data Mart = DW 的子集，針對特定用途預先彙整：
-  - mart_daily_summary ：每日情緒摘要（供儀表板用）
-  - mart_hot_stocks    ：熱門股票排行（供 API 用）
+  - mart_daily_summary ：每日情緒摘要（供儀表板 + API sentiment endpoints 用）
 
 架構比較：
   ┌──────────────────┬───────────────────────────────────────────────┐
@@ -13,7 +12,7 @@ Data Mart = DW 的子集，針對特定用途預先彙整：
   │ 更新方式          │  REFRESH MATERIALIZED VIEW   ETL TRUNCATE+INSERT│
   │ 可移植性          │  PostgreSQL 限定              任何 DB           │
   │ 本專案使用        │  mv_market_summary           mart_daily_summary│
-  │ 粒度             │  market（TW/US）              source（ptt/cnyes/reddit）│
+  │ 粒度             │  market（TW/US）              source（ptt/cnyes/reddit/cnn/wsj/marketwatch）│
   └──────────────────┴───────────────────────────────────────────────┘
   兩者互補：MV 跑市場層級聚合（Snowflake 三表 JOIN），Mart 跑 source 層級細粒度。
   MV 定義在 dw_schema.py，由 dw_etl.refresh_mv() 呼叫 REFRESH 更新。
@@ -34,57 +33,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 def refresh_mart_daily_summary() -> int:
     """
-    每日情緒摘要刷新：TRUNCATE + INSERT FROM DW。
-    資料來源：fact_sentiment（直接用 fact_date 欄位）
-    供儀表板直接查 mart_daily_summary，不需掃 fact_sentiment 大表。
+    每日情緒摘要刷新：呼叫 PostgreSQL Stored Procedure sp_refresh_mart_daily_summary()。
+    SP 內部執行 TRUNCATE + INSERT FROM fact_sentiment。
+    SQL 邏輯封裝在 DB 端，Python 只負責 CALL。
     回傳：寫入筆數
     """
     with get_pg() as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE mart_daily_summary")
-            cur.execute("""
-                INSERT INTO mart_daily_summary
-                    (summary_date, source_name, total_articles,
-                     avg_sentiment, avg_push_count)
-                SELECT
-                    f.fact_date                    AS summary_date,
-                    f.source_name,
-                    SUM(f.article_count)           AS total_articles,
-                    AVG(f.avg_sentiment)           AS avg_sentiment,
-                    AVG(f.avg_push_count)          AS avg_push_count
-                FROM fact_sentiment f
-                GROUP BY f.fact_date, f.source_name
-            """)
-            count = cur.rowcount
+            cur.execute("CALL sp_refresh_mart_daily_summary()")
+            cur.execute("SELECT COUNT(*) FROM mart_daily_summary")
+            count = cur.fetchone()[0]
     logging.info("[DataMart] mart_daily_summary 刷新完成，%d 筆", count)
-    return count
-
-
-# ─── mart_hot_stocks ───────────────────────────────────────────────────────────
-
-def refresh_mart_hot_stocks() -> int:
-    """
-    熱門股票刷新：TRUNCATE + INSERT FROM DW。
-    只保留有推文互動的資料（avg_push_count > 0）。
-    供 API /articles/top_push 端點直接查。
-    回傳：寫入筆數
-    """
-    with get_pg() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE mart_hot_stocks")
-            cur.execute("""
-                INSERT INTO mart_hot_stocks
-                    (report_date, source_name, push_count, article_count)
-                SELECT
-                    f.fact_date                         AS report_date,
-                    f.source_name,
-                    ROUND(f.avg_push_count)::INTEGER    AS push_count,
-                    f.article_count
-                FROM fact_sentiment f
-                WHERE f.avg_push_count > 0
-            """)
-            count = cur.rowcount
-    logging.info("[DataMart] mart_hot_stocks 刷新完成，%d 筆", count)
     return count
 
 
@@ -93,23 +52,13 @@ def refresh_mart_hot_stocks() -> int:
 def get_daily_sentiment(days: int) -> list[dict]:
     """
     取近 N 天的每日加權平均情緒分數（跨來源聚合）。
+    呼叫 PostgreSQL Stored Function fn_get_daily_sentiment(p_days)。
     多來源用 total_articles 做加權，避免「平均的平均」失準。
     供 API sentiment endpoints 使用。
     """
     with get_pg() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    summary_date,
-                    SUM(total_articles) AS total_articles,
-                    SUM(avg_sentiment * total_articles)
-                        / NULLIF(SUM(total_articles), 0) AS avg_sentiment
-                FROM mart_daily_summary
-                WHERE summary_date >= CURRENT_DATE - INTERVAL '%s days'
-                  AND avg_sentiment IS NOT NULL
-                GROUP BY summary_date
-                ORDER BY summary_date DESC
-            """, (days,))
+            cur.execute("SELECT * FROM fn_get_daily_sentiment(%s)", (days,))
             cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -119,7 +68,6 @@ def get_daily_sentiment(days: int) -> list[dict]:
 def refresh_all() -> None:
     """刷新所有 Data Mart（每日 ETL 跑完後呼叫）"""
     refresh_mart_daily_summary()
-    refresh_mart_hot_stocks()
     logging.info("[DataMart] 所有 Data Mart 刷新完成")
 
 

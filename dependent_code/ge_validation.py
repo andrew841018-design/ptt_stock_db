@@ -35,29 +35,26 @@ def ge_validate():
     _log_result(ge_all.expect_column_values_to_not_be_null('Title'))
     _log_result(ge_all.expect_column_values_to_not_be_null('Url'))
 
-    # ── PTT 專屬檢查 ───────────────────────────────────────────────────────────
-    ptt_df = df[df['Source'] == SOURCES["ptt"]["name"]]
-    ge_ptt = PandasDataset(ptt_df)
-    _log_result(ge_ptt.expect_column_values_to_not_be_null('Push_count'))
-    _log_result(ge_ptt.expect_column_values_to_be_between('Push_count', -100, 100))
-    _log_result(ge_ptt.expect_column_values_to_match_regex('Url', r'/bbs/[Ss]tock/.*'))
+    # ── 各來源動態檢查（從 config.SOURCES 衍生，新增來源不需改這裡）──────────
+    for key, src in SOURCES.items():
+        name = src["name"]
+        src_df = df[df['Source'] == name]
 
-    # ── 鉅亨網專屬檢查 ─────────────────────────────────────────────────────────
-    cnyes_df = df[df['Source'] == SOURCES["cnyes"]["name"]]
-    ge_cnyes = PandasDataset(cnyes_df)
-    _log_result(ge_cnyes.expect_column_values_to_match_regex('Url', r'news\.cnyes\.com/news/id/\d+'))
+        if src_df.empty:
+            logging.info(f"GE SKIP：{name} 無資料（尚未爬取）")
+            continue
 
-    # ── Reddit 專屬檢查 ────────────────────────────────────────────────────────
-    reddit_df = df[df['Source'] == SOURCES["reddit"]["name"]]
-    if not reddit_df.empty:
-        ge_reddit = PandasDataset(reddit_df)
-        # URL 格式：https://www.reddit.com/r/{subreddit}/comments/{id}/...
-        _log_result(ge_reddit.expect_column_values_to_match_regex(
-            'Url', r'reddit\.com/r/\w+/comments/'))
-        # push_count 應在 -100~100（Reddit score clamp 過）
-        _log_result(ge_reddit.expect_column_values_to_be_between('Push_count', -100, 100))
-    else:
-        logging.info("GE SKIP：Reddit 無資料（尚未爬取）")
+        ge_src = PandasDataset(src_df)
+
+        # URL 格式檢查（只在 config 有設定 url_pattern 時執行）
+        url_pattern = src.get("url_pattern")
+        if url_pattern:
+            _log_result(ge_src.expect_column_values_to_match_regex('Url', url_pattern))
+
+        # push_count 檢查（只對有推文數的來源執行）
+        if src.get("has_push_count"):
+            _log_result(ge_src.expect_column_values_to_not_be_null('Push_count'))
+            _log_result(ge_src.expect_column_values_to_be_between('Push_count', -100, 100))
 
     # ── us_stock_prices 檢查 ───────────────────────────────────────────────────
     with get_pg() as conn:
@@ -69,8 +66,6 @@ def ge_validate():
         _log_result(ge_us.expect_column_values_to_not_be_null('trade_date'))
         _log_result(ge_us.expect_column_values_to_not_be_null('close'))
         _log_result(ge_us.expect_column_values_to_be_between('close', 1, 10000))
-        # change 每支 ETF 第一筆允許 NULL（無前一日收盤價）；非 NULL 的值應在合理範圍
         _log_result(ge_us.expect_column_values_to_be_between('change', -100, 100, mostly=0.99))
     else:
         logging.warning("GE WARN：us_stock_prices 無資料")
-
