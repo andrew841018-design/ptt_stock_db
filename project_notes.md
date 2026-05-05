@@ -1625,4 +1625,96 @@ pytest -q
 
 **教訓**：`patch` 是字串 magic，IDE refactor 工具不會自動更新；必須 grep 字串才能抓到。
 
-*最後更新：2026-04-30*
+---
+
+## 40. SP 多粒度回傳，consumer 必須有明確聚合層
+
+**事件（2026-05-04）**：`fn_get_daily_sentiment` 是 SQL Function，內部 `GROUP BY summary_date, source_name`，回傳 `(date, source, total_articles, avg_sentiment)` **每天每來源一列**（多列/天）。但 `/sentiments/today` 跟 `/sentiments/change` 直接拿 `rows[0]` / `rows[0..1]` 當作日聚合 → 實際只回傳「按字母排第一個來源」（cnn）的當天分數，不是真正的跨來源加總。`/sentiments/change` 更糟：`rows[0]` 與 `rows[1]` 是同一天兩個不同來源（先 ORDER BY date DESC 再 source），算出來是「cnn 今日 - cnyes 今日」。
+
+**根因模式**：SP 設計成多粒度（per (date, source)）保留來源資訊（與 Mart 哲學一致：「能粗能細才彈性」），但 endpoint 的契約是單粒度（per date）。**中間缺少明確的 aggregation step**，consumer 直接挑「最新 N 筆」就出錯。
+
+**修法**：
+```python
+def _aggregate_by_date(rows: list) -> dict:
+    by_date: dict = {}
+    for r in rows:
+        d = r["summary_date"]
+        slot = by_date.setdefault(d, {"total": 0, "weighted": 0.0})
+        slot["total"] += r["total_articles"]
+        slot["weighted"] += float(r["avg_sentiment"]) * r["total_articles"]
+    return by_date
+```
+
+`/sentiments/today` 取 `max(by_date.keys())` 那筆；`/sentiments/change` 取 sorted dates[:2] 比較。動態驗證：2026-05-03 真實資料 6 來源加權後 = 0.0363（總 209 篇），舊版只回 cnn = 0.0277。
+
+**教訓**：
+1. **SP 多粒度回傳是 feature 不是 bug**（保留 dimension 給未來 query），但 consumer **必須**有 aggregation；不能假設「ORDER BY 第一筆 = 答案」
+2. **Mock 資料要對齊 SP 真實 shape**：本次 `MOCK_SENTIMENT_ROWS` 是「每天單列」，**遮蔽**了真實 bug；mock 應該至少有「同日多列不同 source」案例才能抓到此類錯誤
+3. **Endpoint 契約應寫文件**：`get_daily_sentiment` 的 docstring 說「跨來源聚合」但實際 SP 沒聚合 → 文件與實作不一致是 review 必須抓的 smell
+
+---
+
+## 41. DDL migration block 必須涵蓋所有改動的表
+
+**事件（2026-05-04）**：`dim_market` DDL 在 2026-04-15 從 2 欄升到 5 欄（補 `market_name` / `currency` / `timezone`），但 `create_dw_schema()` 對 `dim_market` 沒有 `ALTER TABLE ADD COLUMN IF NOT EXISTS` block（`dim_source` 加 `market_id` 與 `tracked_stock` 都有，`mart_daily_summary` 缺 `summary_date` 也有 DROP migration block）。
+
+**靜默後果**：本機 DB 04-22 已手動重建為 5 欄，所以無感；但任何停留在舊 schema 的環境（snapshot restore / 別台機器 / 新建 docker volume 又掛舊 dump）會在下次 INSERT 時直接 crash with `column "market_name" does not exist`。**latent bug** 撐了 19 天才被 cross-file consistency review 抓到。
+
+**修法**（與既有 `dim_source` ALTER 模式一致）：
+```python
+cur.execute(CREATE_DIM_MARKET)
+cur.execute("""
+    ALTER TABLE dim_market
+    ADD COLUMN IF NOT EXISTS market_name VARCHAR(50) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS currency VARCHAR(10) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) NOT NULL DEFAULT ''
+""")
+```
+
+`NOT NULL DEFAULT ''` 確保舊 row 不違反 NOT NULL；之後 `populate_dim_market()` 會 ON CONFLICT 更新成正確值。
+
+**通用紀律**：每次 DDL 升欄位（schema.py / dw_schema.py / init_marts.sql），review checklist 必看：
+1. `CREATE TABLE` 是否同步更新（新環境 OK）
+2. `create_*_schema()` 是否有 `ALTER TABLE ADD COLUMN IF NOT EXISTS` block（舊環境 OK）
+3. INSERT 寫的欄位數是否與 DDL 對齊
+4. 對應 SP / Mart 是否引用新欄位
+
+第 2 步最常被遺漏，建議寫成自動化檢查：用 `pg_dump -s` 比對 git 中的 DDL 與 production schema diff。
+
+---
+
+## 42. Agent code review 的「防衛性 false positive」紀律
+
+**現象（2026-05-03 起每天都發生）**：fan-out 多並行 agent 做 code review 時，常見一類「看起來像 bug 但實際是 false positive」的 finding：
+- "function X 沒檢查 `Y is None`，會 crash 在 `float(Y)`"
+- "function X 沒處理 `total == 0` 除零情境，會 ZeroDivisionError"
+- "如果上游 SP 回 NULL 怎辦？建議加 default 0"
+
+**Agent 為什麼會錯**：它讀了 Python consumer 端的 code，推理「萬一 input 出現 NULL/0 怎辦」，但 **沒讀上游 SP / SQL function 的 WHERE / NULLIF / NOT NULL 約束**。SP 已經保證 NULL 不會傳出來，consumer 不需要再防一次。
+
+**今日具體實例（2026-05-05）**：Agent 報 `_aggregate_by_date()`（api.py:189-197）有兩個「production bug」：
+1. `float(r["avg_sentiment"])` 會 crash 當 NULL
+2. `slot["weighted"] / slot["total"]` 會 ZeroDivisionError
+
+實際驗證：`fn_get_daily_sentiment` 第 134 行明寫 `AND m.avg_sentiment IS NOT NULL`，第 128 行 `total_articles` 來自 `COUNT(article_id)` 永遠 ≥1（mart_daily_summary 的入庫條件已決定）。Python 端永遠收不到 NULL/0。
+
+**為什麼不該採納修法**（per memory rule "Don't add error handling for scenarios that can't happen"）：
+- 加 `if r["avg_sentiment"] is not None:` 在 SP 已保證後是無謂防衛
+- 加 `if slot["total"] > 0` 同理
+- 多寫 5 行防衛 → 認知負擔 + 降低 SP 約束的可信度（讀 code 的人會懷疑「為什麼 Python 還在防？SP 沒保證嗎？」）
+
+**正確 review 紀律 — "Stop and Verify before Fixing"**：
+1. Agent 報 finding 時，**不立刻寫修法**
+2. 讀 SP / DDL / 上游 caller 確認約束範圍
+3. 若約束已防範 → 標記 false positive 跳過
+4. 若 agent 是對的 → 修
+
+**統計（2026-04-30 ~ 2026-05-05 7 天）**：
+- 共 ~30 個 agent finding
+- 真實 bug：~7 個（修了）
+- False positive：~23 個（其中 ~15 個是這類「萬一 NULL/0」型防衛建議）
+- **False positive rate ~75%**——絕大多數來自「沒讀 SQL constraint 就在 Python 層提防衛」
+
+**配套**：5/2 的 schema.py UTC default、5/4 的 dim_market migration、5/5 的 PG_DBNAME 9-file alignment 都是 cross-file 真實 bug，agent **能抓到但會混在 75% false positive 中**。經驗：用 5-6 個 agent 並行涵蓋 10 個切入點，主執行緒每筆 finding 花 30 秒驗證，比單線程慢慢看每個檔案快 10x，但驗證紀律不能省。
+
+*最後更新：2026-05-05*

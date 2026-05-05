@@ -186,16 +186,30 @@ def load_articles_df() -> pd.DataFrame:
         raise HTTPException(status_code=500, detail={"message": "database search failed"})
 
 
+def _aggregate_by_date(rows: list) -> dict:
+    """fn_get_daily_sentiment 回傳 (date, source) 多列；以 total_articles 加權，回各日期單一聚合分數。"""
+    by_date: dict = {}
+    for r in rows:
+        d = r["summary_date"]
+        slot = by_date.setdefault(d, {"total": 0, "weighted": 0.0})
+        slot["total"] += r["total_articles"]
+        slot["weighted"] += float(r["avg_sentiment"]) * r["total_articles"]
+    return by_date
+
+
 @app.get("/sentiments/today", response_model=TodaySentimentResponse)
 # Depends(verify_token) 表示這個function需要一個JWT token，如果沒有token，會返回401錯誤
 def get_today_sentiment(user: dict = Depends(verify_token)) -> TodaySentimentResponse:
     rows = get_daily_sentiment(days=7)  # 取近 7 天，拿最新一天
     if not rows:
         raise HTTPException(status_code=404, detail={"message": "No data for today"})
-    latest = rows[0]  # ORDER BY summary_date DESC，第一筆就是最新
+    by_date = _aggregate_by_date(rows)
+    latest_date = max(by_date.keys())
+    slot = by_date[latest_date]
+    score = slot["weighted"] / slot["total"]
     return {
-        "date": str(latest["summary_date"]),
-        "sentiment_score": round(float(latest["avg_sentiment"]), 2),
+        "date": str(latest_date),
+        "sentiment_score": round(score, 2),
         "message": "Success",
     }
 
@@ -203,10 +217,12 @@ def get_today_sentiment(user: dict = Depends(verify_token)) -> TodaySentimentRes
 @app.get("/sentiments/change", response_model=ChangeSentimentResponse)
 def get_change_sentiment(user: dict = Depends(verify_token)) -> ChangeSentimentResponse:
     rows = get_daily_sentiment(days=7)  # 取近 7 天，拿最新兩天比較
-    if len(rows) < 2:
+    by_date = _aggregate_by_date(rows)
+    if len(by_date) < 2:
         raise HTTPException(status_code=404, detail={"message": "No data for today or yesterday"})
-    today_score     = float(rows[0]["avg_sentiment"])
-    yesterday_score = float(rows[1]["avg_sentiment"])
+    dates = sorted(by_date.keys(), reverse=True)
+    today_score     = by_date[dates[0]]["weighted"] / by_date[dates[0]]["total"]
+    yesterday_score = by_date[dates[1]]["weighted"] / by_date[dates[1]]["total"]
     return {
         "change_sentiment_score": round(today_score - yesterday_score, 2),
         "message": "Success",

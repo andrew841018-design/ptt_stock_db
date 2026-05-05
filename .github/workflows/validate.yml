@@ -57,7 +57,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: pw
-          POSTGRES_DB: stock_analysis_db
+          POSTGRES_DB: ptt_stock
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -78,7 +78,7 @@ jobs:
           PG_PORT: 5432
           PG_USER: postgres
           PG_PASSWORD: pw
-          PG_DBNAME: stock_analysis_db
+          PG_DBNAME: ptt_stock
         run: |
           dbt deps
           dbt parse
@@ -91,7 +91,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: pw
-          POSTGRES_DB: stock_analysis_db
+          POSTGRES_DB: ptt_stock
         ports: ["5432:5432"]
       redis:
         image: redis:7

@@ -148,6 +148,14 @@ def create_dw_schema() -> None:
         conn = psycopg2.connect(**PG_ADMIN_CONFIG)
         with conn.cursor() as cur:
             cur.execute(CREATE_DIM_MARKET)
+            # 幂等補欄位：dim_market 早期版本只有 market_id + market_code，
+            # 2026-04-15 起 INSERT 寫 4 欄（market_code/market_name/currency/timezone）。
+            cur.execute("""
+                ALTER TABLE dim_market
+                ADD COLUMN IF NOT EXISTS market_name VARCHAR(50) NOT NULL DEFAULT '',
+                ADD COLUMN IF NOT EXISTS currency VARCHAR(10) NOT NULL DEFAULT '',
+                ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) NOT NULL DEFAULT ''
+            """)
             logging.info("dim_market created (or already exists)")
             cur.execute(CREATE_DIM_SOURCE)
             # 幂等補欄位：dim_source 已存在時加入 market_id FK

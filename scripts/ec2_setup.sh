@@ -48,7 +48,7 @@ sudo docker run -d \
     --name ptt_stock_db \
     --restart=always \
     -e POSTGRES_PASSWORD=pw \
-    -e POSTGRES_DB=stock_analysis_db \
+    -e POSTGRES_DB=ptt_stock \
     -p 5432:5432 \
     -v /home/ubuntu/pgdata:/var/lib/postgresql/data \
     postgres:16

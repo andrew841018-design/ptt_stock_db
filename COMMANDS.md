@@ -266,7 +266,7 @@ docker exec -it stock_postgres psql -U postgres       # 進 PG CLI
 
 # PG 手動查
 pg_isready -h localhost -p 5432
-psql -h localhost -U postgres -d stock_analysis_db
+psql -h localhost -U postgres -d ptt_stock
 ```
 
 ---

@@ -91,7 +91,7 @@ SOURCES = {
         "market":         "US",
         "lang":           "en",
         "stock":          "VOO",
-        "url_pattern":    r"cnn\.com/",
+        "url_pattern":    r"(cnn\.com/|news\.google\.com/rss/articles/)",
         "color":          "#d62728",
     },
     "wsj": {
@@ -101,7 +101,7 @@ SOURCES = {
         "market":         "US",
         "lang":           "en",
         "stock":          "VOO",
-        "url_pattern":    r"wsj\.com/",
+        "url_pattern":    r"(wsj\.com/|news\.google\.com/rss/articles/)",
         "color":          "#9467bd",
     },
     "marketwatch": {
@@ -111,7 +111,7 @@ SOURCES = {
         "market":         "US",
         "lang":           "en",
         "stock":          "VOO",
-        "url_pattern":    r"marketwatch\.com/",
+        "url_pattern":    r"(marketwatch\.com/|news\.google\.com/rss/articles/)",
         "color":          "#8c564b",
     },
 }

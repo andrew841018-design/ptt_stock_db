@@ -626,3 +626,12 @@ pipeline.py 的 QA 失敗時自動觸發修復流程：
 - **根因**：`patch("api.X")` 是字串魔法，IDE refactor 不會自動同步測試；改名後必須 grep `patch(.*\.old_name` 全 codebase
 - **修法**：sed 批次將 `api.get_pg_readonly` → `api.get_pg_pooled`（共 8 處）→ 23 passed
 - **規範**：本專案任何 helper/function 改名前先跑 `grep -rn 'patch(.*\.<old_name>' --include="test_*.py"`，確認 mock target 同步
+
+### `PG_DBNAME` 跨檔對齊清單（持續擴張，2026-05-05）
+單一 DB name 改名（`stock_analysis_db` → `ptt_stock`）跨 **9 個檔案**才算對齊：
+- 主要設定：`.env`、`dependent_code/config.py`（fallback）、`dependent_code/schema.py`（GRANT 用）、`dependent_code/backup.py`（pg_dump 用）
+- Container：`docker-compose.yml`（POSTGRES_DB + 3 處 SQL_ALCHEMY_CONN）、`k8s/configmap.yaml`、`scripts/ec2_setup.sh`（重跑時用）
+- CI / dev tools：`.github/workflows/validate.yml`（dbt + pytest 兩個 job 共 3 處）、`COMMANDS.md`（psql 範例指令）
+- **不要動的**：`mongo_helper.py` 的 `MONGO_DB="stock_analysis_db"` 是 MongoDB 庫名，與 PG 同名是巧合不是 drift
+- 漏掉任一個 → CI silent fail / EC2 重新部署炸 / 手動 psql 連不上。應對：未來 DB 改名前先 `grep -rn '<舊名>' --include='*.{py,yml,yaml,sh,md,json}'` 全 codebase 確認 surface
+- **教訓**：one-shot setup script（如 ec2_setup.sh）也算 config drift surface，不能因為「只跑一次」就漏掉
