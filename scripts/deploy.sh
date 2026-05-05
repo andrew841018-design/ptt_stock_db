@@ -38,7 +38,6 @@ log_info "專案目錄：${PROJECT_DIR}"
 # 確認必要工具已安裝
 check_command git
 check_command docker
-check_command docker-compose
 
 # 確認 Docker daemon 正在執行
 if ! docker info &> /dev/null; then
@@ -75,7 +74,7 @@ log_info "程式碼已更新至最新版本"
 # ─── Step 2：建構 Docker image ─────────────────────────────────────────
 
 log_info "Step 2/5：建構 Docker image"
-docker-compose -f "${COMPOSE_FILE}" build --no-cache || {
+docker compose -f "${COMPOSE_FILE}" build --no-cache || {
     log_error "Docker image 建構失敗"
     exit 1
 }
@@ -86,10 +85,10 @@ log_info "Docker image 建構完成"
 log_info "Step 3/5：啟動所有服務"
 
 # 先停止舊容器（如果有的話）
-docker-compose -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
+docker compose -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
 
 # 啟動所有服務（背景執行）
-docker-compose -f "${COMPOSE_FILE}" up -d || {
+docker compose -f "${COMPOSE_FILE}" up -d || {
     log_error "Docker Compose 啟動失敗"
     exit 1
 }
@@ -105,8 +104,8 @@ ELAPSED=0
 
 while [ $ELAPSED -lt $MAX_WAIT ]; do
     # 檢查所有容器是否都在 running 狀態
-    RUNNING=$(docker-compose -f "${COMPOSE_FILE}" ps --services --filter "status=running" 2>/dev/null | wc -l | tr -d ' ')
-    TOTAL=$(docker-compose -f "${COMPOSE_FILE}" ps --services 2>/dev/null | wc -l | tr -d ' ')
+    RUNNING=$(docker compose -f "${COMPOSE_FILE}" ps --services --filter "status=running" 2>/dev/null | wc -l | tr -d ' ')
+    TOTAL=$(docker compose -f "${COMPOSE_FILE}" ps --services 2>/dev/null | wc -l | tr -d ' ')
 
     if [ "$RUNNING" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
         log_info "所有服務已就緒（${RUNNING}/${TOTAL}）"
@@ -121,7 +120,7 @@ done
 if [ $ELAPSED -ge $MAX_WAIT ]; then
     log_error "服務啟動逾時（超過 ${MAX_WAIT} 秒）"
     log_error "容器狀態："
-    docker-compose -f "${COMPOSE_FILE}" ps
+    docker compose -f "${COMPOSE_FILE}" ps
     exit 1
 fi
 
@@ -151,7 +150,7 @@ echo ""
 
 # 顯示所有容器狀態
 log_info "容器狀態："
-docker-compose -f "${COMPOSE_FILE}" ps
+docker compose -f "${COMPOSE_FILE}" ps
 
 echo ""
 log_info "服務端點："
