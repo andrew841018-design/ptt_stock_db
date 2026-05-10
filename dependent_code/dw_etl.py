@@ -7,7 +7,7 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
   3. populate_dim_stock()      - 預設種入 0050 / VOO（幂等）
   4. populate_fact_sentiment() - 每日每來源情緒聚合，ON CONFLICT DO UPDATE（upsert）
   5. refresh_all()             - 刷新 Data Mart（mart_daily_summary）
-  6. refresh_mv()              - 刷新 Materialized View（mv_market_summary，市場層級聚合）
+  (市場層級聚合在 Step 5 透過 data_mart.refresh_mart_market_summary() 處理)
 
 支援增量：每次只處理自上次 ETL 以來有新文章的日期（不全量重算）
 """
@@ -15,7 +15,6 @@ Data Warehouse ETL：OLTP → Star Schema（incremental）
 import logging
 import psycopg2
 from config import PG_CONFIG
-from pg_helper import get_pg
 from dw_schema import create_dw_schema
 from data_mart import refresh_all, ensure_sp_schema
 
@@ -113,15 +112,7 @@ def populate_fact_sentiment(cur) -> None:
     logging.info("[DW ETL] fact_sentiment upserted via sp_populate_fact_sentiment()")
 
 
-# ─── Step 6：Materialized View 刷新 ────────────────────────────────────────────
-# mv_market_summary 是 PostgreSQL 特有的 MV，第一次 CREATE 時用 `WITH NO DATA`
-# 不填資料，由 ETL 跑完 fact 之後 REFRESH 一次性填滿。
-# 與 Data Mart 的 TRUNCATE+INSERT 比，MV 的 REFRESH 是 PostgreSQL 內建原子操作。
-
-def refresh_mv(cur) -> None:
-    """刷新 mv_market_summary（市場層級聚合，利用 Snowflake 三表 JOIN）"""
-    cur.execute("REFRESH MATERIALIZED VIEW mv_market_summary")
-    logging.info("[DW ETL] mv_market_summary refreshed")
+# Step 6（市場層級聚合）已合併進 data_mart.refresh_all() — 2026-05-07 MV → Mart 統一
 
 
 # ─── CLUSTER（讓 fact 資料實體上按 date_id 排序，加速日期範圍查詢）─────────────
@@ -154,12 +145,7 @@ def run_etl(do_cluster: bool = False) -> None:
             with conn.cursor() as cur:
                 cluster_fact(cur)
         conn.commit()
-        refresh_all()                  # Step 5：刷新 Data Mart（mart_daily_summary）
-        # Step 6：刷新 Materialized View（需要自己的 connection，REFRESH 不能在剛 rollback 的 cursor 上跑）
-        # 用 get_pg() context manager 保證 connection 會 close（psycopg2 v2 的 `with conn:` 只管 transaction，不會 close）
-        with get_pg() as mv_conn:
-            with mv_conn.cursor() as mv_cur:
-                refresh_mv(mv_cur)
+        refresh_all()                  # Step 5：刷新所有 Data Mart（daily + market）
         logging.info("[DW ETL] 完成")
     except psycopg2.Error as e:
         logging.error("[DW ETL] 失敗：%s", e)

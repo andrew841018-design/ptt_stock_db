@@ -743,18 +743,7 @@
 - [ ] **Google Looker Studio 儀表板**（looker_export.py 已完成，CSV 已匯出）
 - [ ] Phase 6：Kubernetes、Prometheus、Grafana、Docker Compose、Airflow
 
-#### ⚠️ PTT 專案完成後提醒
-
-**開一個 BTC Pipeline 練習以下技能**（PTT 專案資料量不足，無法有效練習）：
-
-| 技能 | PTT 做不到的原因 | BTC Pipeline 怎麼練 |
-|------|------------------|---------------------|
-| Spark + PySpark | 600k rows，JVM 啟動 overhead > 實際計算 | 用公開大資料集（NYC Taxi 10GB+）跑 Databricks Community |
-| Hadoop / Hive / HDFS | 100MB 資料放單機就好 | Docker Hadoop cluster + Hive 查詢 HDFS |
-| Spark ML Pipeline | 需要大量資料才能展現優勢 | 與 Spark 同一個 BTC Pipeline |
-| Kafka Streaming | PTT 無即時串流來源 | 模擬即時資料源 → Kafka → Consumer → DB |
-| Partition Strategy | 600k rows 分區沒有可測量的效能提升 | 大資料集 + PostgreSQL Range Partition |
-| Data Lake (S3) | 已用 MongoDB raw_responses 取代 | 搭配 Spark 練 S3 raw → processed → curated 三層 |
+<!-- 跨專案內容已移除 5/9 -->
 
 ---
 

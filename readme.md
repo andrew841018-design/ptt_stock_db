@@ -540,6 +540,8 @@ schema → extract（PTT + 鉅亨網 + Reddit + CNN + WSJ + MarketWatch + TWSE +
 - [x] pipeline.py update_dependencies stamp 時區修正（3 處 `datetime.now()` → `datetime.utcnow()`，與 codebase 一致）
 - [x] reddit_scraper.py JSON 解析防禦（`response.json()` 移進 try/except，Reddit 回傳被截斷 response 時降為 warning + break，不中斷其他來源）
 - [x] cli.py `_cmd_pipeline` 移除未使用 `os` import（pyflakes 全綠）
+- [x] scrapers/reddit_batch_loader.py logging format 對齊（連字號 → 方括號，與 codebase 16 個其他模組一致；5/6 修了 pipeline.py / tasks.py 的最後一個漏網之魚）
+- [x] dw_schema.py mart_daily_summary 跨環境 ALTER block 補上（與 dim_source / dim_market 同 pattern；防 snapshot restore 或別台機器掛舊 dump 時 INSERT crash）
 - [x] dependent_code/__pycache__ 幽靈 pyc 清除（backtest / fetch_etf_holdings / looker_export / perf_tuning / stock_matcher 共 7 個檔；source 已刪但 pyc 殘留會造成幽靈 import）
 - [x] feedparser 安裝（WSJ / MarketWatch RSS 解析）
 - [x] `cmd.cpython-39.pyc` 殘留快取清除（cmd.py → cli.py 改名後的遺留問題）

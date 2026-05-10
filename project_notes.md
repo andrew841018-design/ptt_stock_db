@@ -1182,34 +1182,7 @@ envFrom:
 
 ---
 
-## 十九、BTC Pipeline — 大資料實踐
-
-### Kafka 串流
-- **KRaft mode**: Kafka 3.7+ 不需要 Zookeeper，KAFKA_PROCESS_ROLES=broker,controller
-- **Idempotent Producer**: enable_idempotence=True → 避免重複推送（exactly-once 語義的基礎）
-- **Manual Offset Commit**: enable_auto_commit=False → 處理完才 commit，確保 at-least-once
-- **Dead Letter Queue (DLQ)**: 壞訊息不丟棄，送入另一個 topic 事後排查
-- **Partition Key**: 同一 symbol 進同一 partition → 保證同交易對的訊息順序
-
-### Data Lake 三層
-- **raw → processed → curated**: 原始 JSONL → 清洗後 Parquet (Snappy) → 聚合 OHLCV
-- **Quarantine Layer**: 壞資料（price≤0、quantity≤0、trade_id=None）不混入主流程，隔離到 quarantine/
-- **Snappy 壓縮**: Parquet + Snappy ≈ 6.6x 壓縮，兼顧壓縮率和解壓速度
-
-### Partition Strategy
-- **partitionBy('date','symbol')**: 寫入時建立 Hive-style 目錄 `date=2026-03-15/symbol=BTCUSDT/`
-- **Partition Pruning**: 查詢 WHERE date='...' 時，Spark 只掃描目標分區目錄，跳過其他 → explain 看 PartitionFilters
-- **repartition vs coalesce**: repartition = full shuffle（可增可減）、coalesce = no shuffle（只能縮減）
-- **何時該分區**: 資料夠大 + 查詢有明確的分區鍵（低基數、常用於 WHERE）
-
-### Spark ML Pipeline
-- **Transformer**: 轉換資料但不改 schema（VectorAssembler、StandardScaler）
-- **Estimator**: fit() 後產出 Transformer（RandomForestClassifier → RandomForestClassificationModel）
-- **Pipeline**: 串接 stages，fit(train) 一次完成所有 stage → PipelineModel
-- **VectorAssembler**: 多個 feature column → 一個 Vector column（Spark ML 要求）
-- **模型儲存**: model.write().save(path) → 完整保留 Pipeline 所有 stage
-
----
+<!-- 十九 章節已移除 5/9 -->
 
 ## 十五、專案檔案相依性架構圖
 
@@ -1717,4 +1690,66 @@ cur.execute("""
 
 **配套**：5/2 的 schema.py UTC default、5/4 的 dim_market migration、5/5 的 PG_DBNAME 9-file alignment 都是 cross-file 真實 bug，agent **能抓到但會混在 75% false positive 中**。經驗：用 5-6 個 agent 並行涵蓋 10 個切入點，主執行緒每筆 finding 花 30 秒驗證，比單線程慢慢看每個檔案快 10x，但驗證紀律不能省。
 
-*最後更新：2026-05-05*
+---
+
+## 43. DW 表的 ALTER ADD COLUMN IF NOT EXISTS 應全表覆蓋（2026-05-07 延伸 5/4 教訓）
+
+**事件**：5/4 補了 `dim_market` 三欄 ALTER block 後，今天 5/7 review 又抓到 `mart_daily_summary` 也缺同類防線（只有「缺 summary_date 就 DROP」一條 migration，沒有「有 summary_date 但缺其他欄位」的 ALTER ADD COLUMN block）。本機 04-22 已重建為 5 欄無感，但 snapshot restore / 別台機器掛舊 dump 會在下次 INSERT 直接 crash。
+
+**修法**（與 5/4 dim_market、04-15 dim_source 同 pattern）：
+```python
+cur.execute(CREATE_MART_DAILY_SUMMARY)
+cur.execute("""
+    ALTER TABLE mart_daily_summary
+    ADD COLUMN IF NOT EXISTS total_articles INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS avg_sentiment NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS avg_push_count NUMERIC(8,2)
+""")
+```
+
+**通用紀律延伸**：每次 DDL 改動表結構，review checklist 必看「是否同步補 ALTER ADD COLUMN IF NOT EXISTS」。建議下次 playbook 加機械化檢查：迭代 `CREATE TABLE` 區塊，比對是否有對應 ALTER block，避免 latent 跨環境 bug 撐多日才被抓到。
+
+新增欄位 NULL 與否考量：
+- `NOT NULL DEFAULT 0`（如 `total_articles`）：舊 row 補 0 不違反 NOT NULL，後續 SP refresh 會覆蓋成正確值
+- 可 NULL（如 `avg_sentiment / avg_push_count`）：當天該 source 可能整組沒 score（BERT 還沒跑），允許 NULL，下游 `fn_get_daily_sentiment` 已有 `WHERE m.avg_sentiment IS NOT NULL` 過濾
+
+**目前覆蓋狀態（2026-05-07）**：
+| 表 | CREATE | ALTER block 防線 |
+|----|--------|------------------|
+| `dim_market` | 5 欄 | ✅（5/4 補）|
+| `dim_source` | market_id + tracked_stock | ✅（早期就有）|
+| `mart_daily_summary` | 5 欄 | ✅（5/7 補）|
+| `fact_sentiment` | 7 欄 | ❓ 尚無「後加欄位」歷史 |
+| `dim_stock` | 3 欄 | ❓ 尚無「後加欄位」歷史 |
+| `mv_market_summary` | MV，靠 REFRESH 全重算 | N/A |
+
+未來若 `fact_sentiment` / `dim_stock` 加欄位，必須同步補 ALTER block。
+
+---
+
+## 44. SP 多粒度回傳 + Python 端加權失真（2026-05-07 known issue，未自動修）
+
+**事件**：`init_marts.sql:81` `sp_populate_fact_sentiment` 把 `articles` LEFT JOIN `sentiment_scores` 後 GROUP BY 算：
+```sql
+COUNT(a.article_id)   AS article_count,    -- 算所有文章（含未跑 BERT）
+AVG(ss.score)         AS avg_sentiment,    -- 只 average 非 NULL（已跑 BERT）
+```
+
+下游 `fn_get_daily_sentiment` 回傳 `(date, source, total_articles, avg_sentiment)`，Python `_aggregate_by_date` 用 `total_articles` 加權跨來源：
+```python
+slot["weighted"] += float(r["avg_sentiment"]) * r["total_articles"]
+slot["total"] += r["total_articles"]
+```
+
+**失真情境**：BERT 落後（特別是 wayback_cnn / wayback_wsj backfill 大量歷史時），某 source 當天 100 篇文章只跑了 30 篇 BERT，但 weight 仍用 100。跨來源加權結果偏向「BERT 跑得齊全的 source」減少權重，反之亦然。
+
+**為什麼 5/7 沒自動修**：涉及語意決策——
+- 修法 A：`COUNT(*) FILTER (WHERE ss.score IS NOT NULL) AS article_count` → 改變 dashboard 顯示「總篇數」變「scored 篇數」
+- 修法 B：保留 `article_count` 顯示總篇數，新增 `scored_count` 欄位作 weight；改 _aggregate 用 scored_count
+- 修法 C：BERT 跑完當天才生成 mart row（延遲 mart refresh）
+
+修法 B 影響面最小但需 schema 變更（mart_daily_summary 加欄位 + 新 ALTER block）。Scheduled update 不擅自做語意變動，列為 known issue 等 user 決定。
+
+**何時最痛**：wayback backfill 大量灌入歷史文章 + BERT inference 跟不上時。當前 5/3 起 BERT 已跑得不錯，新增文章基本當天有 score，加權失真實際影響小（10% 內）。但 wayback CDX 期間（如 4/14-4/17 backfill 1000 篇/天）會放大。
+
+*最後更新：2026-05-07*

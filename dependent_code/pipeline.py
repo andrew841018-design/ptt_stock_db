@@ -39,7 +39,7 @@ from mongo_helper import ensure_indexes
 # stream=sys.stdout：logging 寫 stdout，tqdm 保持 stderr，redirect 時乾淨分離
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(message)s",
     stream=sys.stdout,
 )
 
@@ -278,9 +278,13 @@ def run_pipeline() -> None:
                 logging.warning(f"[Deps] 失敗（不中止 pipeline）：{e}")
 
         # Step 0：確保 OLTP 表（PostgreSQL）與 MongoDB index 存在（IF NOT EXISTS，幂等）
+        # MongoDB 掛掉時 ensure_indexes 失敗不中止 pipeline——save_raw_response 已有降級
         with _step("schema"):
             create_schema()
-            ensure_indexes()
+            try:
+                ensure_indexes()
+            except Exception as e:
+                logging.warning(f"[Mongo] ensure_indexes 失敗（不中止 pipeline）：{e}")
 
         # Step 1：爬蟲寫入 OLTP
         with _step("extract"):

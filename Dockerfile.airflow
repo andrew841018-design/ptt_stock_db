@@ -1,0 +1,17 @@
+FROM apache/airflow:2.9.3
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+COPY dependent_code/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Pre-download HuggingFace BERT sentiment model (~440MB) into image cache
+# so bert_inference task doesn't download on every fresh container start.
+# Cache dir: /home/airflow/.cache/huggingface/hub (HF default for USER airflow)
+RUN python3 -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; AutoModelForSequenceClassification.from_pretrained('lxyuan/distilbert-base-multilingual-cased-sentiments-student'); AutoTokenizer.from_pretrained('lxyuan/distilbert-base-multilingual-cased-sentiments-student')"
