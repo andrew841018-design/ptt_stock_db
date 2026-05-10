@@ -1,10 +1,10 @@
 # =============================================================================
 # CI/CD Pipeline
 # -----------------------------------------------------------------------------
-# 自動化流程：test → build → deploy（Docker Compose 或 K8s）→ health check
+# 自動化流程：test → build → deploy（Docker Compose）→ health check
 #
 # 觸發方式：
-#   - push to main：自動跑 test + build + deploy-docker + deploy-k8s
+#   - push to main：自動跑 test + build + deploy-docker
 #   - workflow_dispatch：手動觸發，可選擇跑 EC2 初始建置 / Wayback 回填
 #
 # 涵蓋的基礎設施檔案：
@@ -12,7 +12,6 @@
 #   - docker-compose.yml      → deploy-docker job（透過 scripts/deploy.sh）
 #   - prometheus.yml          → docker-compose 自動 mount
 #   - grafana/provisioning/   → docker-compose 自動 mount
-#   - k8s/*.yaml (8 個)       → deploy-k8s job
 #   - scripts/deploy.sh       → deploy-docker job 核心腳本
 #   - scripts/health_check.sh → deploy.sh 內部呼叫 + post-deploy job
 #   - scripts/ec2_setup.sh    → ec2-setup job（手動觸發）
@@ -30,7 +29,6 @@ name: CI/CD Pipeline
 #    EC2_SSH_KEY      → EC2 SSH private key（整個 .pem 檔內容貼進去）
 #    DOCKER_USERNAME  → Docker Hub 帳號
 #    DOCKER_PASSWORD  → Docker Hub access token（不要用密碼）
-#    KUBE_CONFIG      → base64(kubeconfig)（僅 K8s opt-in 時需要）
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -38,15 +36,11 @@ on:
     branches:
       - main
 
-  # 手動觸發：Docker Hub push / K8s 部署 / EC2 初始建置 / Wayback 回填
+  # 手動觸發：Docker Hub push / EC2 初始建置 / Wayback 回填
   workflow_dispatch:
     inputs:
       build_image:
         description: "Build and push Docker image to Docker Hub (requires DOCKER_USERNAME/DOCKER_PASSWORD secrets)"
-        type: boolean
-        default: false
-      deploy_k8s:
-        description: "Also deploy to K8s cluster (requires KUBE_CONFIG secret)"
         type: boolean
         default: false
       ec2_setup:
@@ -139,39 +133,6 @@ jobs:
             #   3. 等待服務就緒
             #   4. health_check.sh（檢查 FastAPI / PG / Redis / Airflow）
             bash scripts/deploy.sh
-
-  # ===========================================================================
-  # Job 4：Deploy via Kubernetes（opt-in，手動勾選 deploy_k8s 才跑）
-  # 涵蓋：k8s/ 下 yaml（namespace → configmap → secret → 基礎設施 → 應用 → 排程）
-  # ===========================================================================
-  deploy-k8s:
-    needs: test
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_k8s == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-
-      - name: Deploy to K8s
-        run: |
-          # 順序很重要：namespace 最先，應用最後
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/configmap.yaml
-          kubectl apply -f k8s/secret.yaml
-          kubectl apply -f k8s/postgres-deployment.yaml
-          kubectl apply -f k8s/redis-deployment.yaml
-          kubectl apply -f k8s/api-deployment.yaml
-          # 排程任務由 CronJob 觸發（每次執行產生新 Pod、跑完即刪），
-          # 不需要常駐 worker Deployment；debug 時用 `cli.py k8s-debug` 臨時起 Pod
-          kubectl apply -f k8s/cronjob.yaml
-
-      - name: Verify rollout
-        run: |
-          kubectl -n stock-sentiment rollout status deployment/api-deployment --timeout=120s
 
   # ===========================================================================
   # Job 5：Post-deploy — health check + dbt
