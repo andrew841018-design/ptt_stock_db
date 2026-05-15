@@ -1,14 +1,3 @@
-"""
-BERT 情緒分析完整流程（Phase 5）
-
-流程：
-  1. load_labeled_data()   - 從 article_labels + articles 載入標注資料
-  2. train()               - fine-tune（AdamW lr=2e-5, epochs=3）
-  3. evaluate()            - F1-score + Confusion Matrix
-  4. run_batch_inference() - 批次為所有文章填入 sentiment_scores
-
-模型儲存路徑：dependent_code/models/sentiment_bert/
-"""
 
 import logging
 import os
@@ -33,18 +22,16 @@ from pg_helper import get_pg
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ─── 常數 ──────────────────────────────────────────────────────────────────────
 
 LABEL_MAP     = {"negative": 0, "neutral": 1, "positive": 2}
 ID_TO_LABEL   = {id_: label for label, id_ in LABEL_MAP.items()}
 MODEL_DIR     = os.path.join(os.path.dirname(__file__), "models", "sentiment_bert")
-MIN_SAMPLES   = 50    # 低於此數直接用 zero-shot，不 fine-tune
+MIN_SAMPLES   = 50
 MAX_LEN       = 256
 BATCH_SIZE    = 16
 EPOCHS        = 3
 LR            = 2e-5
 
-# ─── Dataset ──────────────────────────────────────────────────────────────────
 
 class SentimentDataset(Dataset):
     def __init__(self, texts: list[str], labels: Optional[list[int]], tokenizer):
@@ -67,10 +54,8 @@ class SentimentDataset(Dataset):
         return item
 
 
-# ─── 資料載入 ──────────────────────────────────────────────────────────────────
 
 def should_finetune() -> bool:
-    """True 若 article_labels >= MIN_SAMPLES 且 fine-tuned 模型目錄不存在（避免重複訓練）"""
     if os.path.isdir(MODEL_DIR):
         return False
     with get_pg() as conn:
@@ -81,7 +66,6 @@ def should_finetune() -> bool:
 
 
 def load_labeled_data() -> tuple[list[str], list[int]]:
-    """從 article_labels JOIN articles 載入標注資料，回傳 (texts, labels)"""
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -96,14 +80,13 @@ def load_labeled_data() -> tuple[list[str], list[int]]:
     if not rows:
         return [], []
 
-    texts  = [text[:1000] for text, _ in rows]    # 截斷避免超長文章
+    texts  = [text[:1000] for text, _ in rows]
     labels = [LABEL_MAP[label] for _, label in rows]
     logging.info("[BERT] 載入 %d 筆標注資料", len(texts))
     return texts, labels
 
 
 def _split(texts, labels, val_ratio=0.1, test_ratio=0.1, seed=42):
-    """stratified split → (train, val, test)，每組 (texts, labels)"""
     from sklearn.model_selection import train_test_split
 
     x_train, x_test, y_train, y_test = train_test_split(
@@ -116,10 +99,8 @@ def _split(texts, labels, val_ratio=0.1, test_ratio=0.1, seed=42):
     return (x_train, y_train), (x_val, y_val), (x_test, y_test)
 
 
-# ─── 訓練 ──────────────────────────────────────────────────────────────────────
 
 def train() -> None:
-    """Fine-tune BERT 情緒分類模型"""
     texts, labels = load_labeled_data()
 
     if len(texts) < MIN_SAMPLES:
@@ -151,7 +132,6 @@ def train() -> None:
 
     best_val_acc = 0.0
     for epoch in range(1, EPOCHS + 1):
-        # ── 訓練 ──
         model.train()
         total_loss = 0.0
         for batch in train_loader:
@@ -167,7 +147,6 @@ def train() -> None:
 
         avg_loss = total_loss / len(train_loader)
 
-        # ── 驗證 ──
         model.eval()
         correct = total = 0
         with torch.no_grad():
@@ -190,10 +169,8 @@ def train() -> None:
     logging.info("[BERT] Fine-tuning 完成，最佳 val_acc=%.4f", best_val_acc)
 
 
-# ─── 評估 ──────────────────────────────────────────────────────────────────────
 
 def evaluate() -> None:
-    """在 test set 計算 F1-score，畫 Confusion Matrix"""
     import seaborn as sns
     import matplotlib.pyplot as plt
     from sklearn.metrics import (
@@ -231,7 +208,6 @@ def evaluate() -> None:
     macro_f1 = f1_score(y_te, preds, average="macro")
     logging.info("[BERT] Macro F1-score: %.4f", macro_f1)
 
-    # Confusion Matrix
     cm = confusion_matrix(labels_str, preds_str, labels=target_names)
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
@@ -246,10 +222,8 @@ def evaluate() -> None:
     plt.close(fig)
 
 
-# ─── 推論 ──────────────────────────────────────────────────────────────────────
 
 def _load_model_and_tokenizer():
-    """優先用 fine-tuned 模型，否則 fallback 到預訓練模型（zero-shot）"""
     model_path = MODEL_DIR if os.path.isdir(MODEL_DIR) else BERT_MODEL
     if model_path == BERT_MODEL:
         logging.info("[BERT] 使用預訓練模型（zero-shot）：%s", BERT_MODEL)
@@ -261,15 +235,8 @@ def _load_model_and_tokenizer():
     return model, tokenizer
 
 
-# ─── 批次推論入庫 ──────────────────────────────────────────────────────────────
 
 def run_batch_inference(batch_size: int = 500) -> None:
-    """
-    為所有尚未有 sentiment_score 的文章跑推論，寫入 sentiment_scores 表。
-    支援增量（只處理尚未有 score 的文章）且每批即時 commit，
-    中途中斷後重跑可從上次進度繼續。
-    """
-    # 先計算總量
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -291,7 +258,6 @@ def run_batch_inference(batch_size: int = 500) -> None:
 
     processed = 0
     while True:
-        # 每次取一批尚未處理的文章
         with get_pg() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"""
@@ -311,18 +277,21 @@ def run_batch_inference(batch_size: int = 500) -> None:
         ids   = [article_id for article_id, _ in rows]
         texts = [text[:1000] for _, text in rows]
 
-        # 推論這一批
-        encodings = tokenizer(
-            texts, max_length=MAX_LEN, truncation=True,
-            padding="max_length", return_tensors="pt",
-        )
-        encodings = {key: tensor.to(device) for key, tensor in encodings.items()}
-        with torch.no_grad():
-            logits = model(**encodings).logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        scores = [float(prob[2] - prob[0]) for prob in probs]   # P(pos) - P(neg)
+        INFERENCE_CHUNK = 16
+        scores: list[float] = []
+        for chunk_start in range(0, len(texts), INFERENCE_CHUNK):
+            chunk_texts = texts[chunk_start:chunk_start + INFERENCE_CHUNK]
+            encodings = tokenizer(
+                chunk_texts, max_length=MAX_LEN, truncation=True,
+                padding=True, return_tensors="pt",
+            )
+            encodings = {key: tensor.to(device) for key, tensor in encodings.items()}
+            with torch.no_grad():
+                logits = model(**encodings).logits
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()
+            scores.extend(float(prob[2] - prob[0]) for prob in probs)
+            del encodings, logits, probs
 
-        # 即時寫入 DB（每批獨立 commit）
         with get_pg() as conn:
             with conn.cursor() as cur:
                 cur.executemany(

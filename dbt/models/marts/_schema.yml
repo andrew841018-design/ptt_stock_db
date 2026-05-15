@@ -20,3 +20,32 @@ models:
         tests: [not_null]
       - name: pos_ratio
         description: "pos_count / article_count；若無文章為 NULL"
+
+  - name: fact_sentiment_v2
+    description: "v2 fact (Phase 2a, parallel to fact_sentiment): per (fact_date, source_id, source_name) sentiment stats. Reads from int_articles_with_sentiment + stg_sources_v2."
+    columns:
+      - name: fact_date
+        tests: [not_null]
+      - name: source_id
+        description: "SERIAL int from stg_sources_v2 (Phase 2b.1: MIN(raw_id) OVER (PARTITION BY source_name)). FK-compatible with v1 OLTP sources.source_id."
+        tests: [not_null]
+      - name: source_name
+        tests: [not_null]
+      - name: article_count
+        tests: [not_null]
+      - name: avg_score
+        tests: [not_null]
+      - name: pipeline_version
+        description: "Literal 'v2' for debugging cutover diffs"
+
+  - name: mart_daily_summary_v2
+    description: "v2 mart (Phase 2a, parallel to mart_daily_summary): adds pos_ratio / neg_ratio. Reads from fact_sentiment_v2."
+    columns:
+      - name: fact_date
+        tests: [not_null]
+      - name: source_name
+        tests: [not_null]
+      - name: pos_ratio
+        description: "pos_count / article_count; NULL if no articles"
+      - name: pipeline_version
+        description: "Literal 'v2' carried through from fact_sentiment_v2"

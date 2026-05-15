@@ -11,25 +11,17 @@ import yfinance as yf
 from pg_helper import get_pg
 from config import US_STOCK_PRICES_TABLE
 
-US_STOCK_MONTHS = 120  # 每次抓幾個月的歷史資料
+US_STOCK_MONTHS = 120
 
-_TICKER = "VOO"  # 固定追蹤單一標的
+_TICKER = "VOO"
 
 _YF_MAX_RETRIES = 3
-_YF_BACKOFF_SECONDS = (5, 15, 30)  # exponential backoff between retries
+_YF_BACKOFF_SECONDS = (5, 15, 30)
 
 
 class UsStockFetcher:
-    """
-    美股 ETF 股價資料抓取器，使用 yfinance。
-
-    不繼承 BaseScraper（股價不是文章）。
-    固定追蹤 VOO，寫入 us_stock_prices 表。
-    資料來源：Yahoo Finance（yfinance，不需 API key）
-    """
 
     def run(self) -> None:
-        """主流程：抓取 VOO 近 N 個月股價，寫入 DB"""
         logging.info(f"開始抓取 {_TICKER} 股價（近 {US_STOCK_MONTHS} 個月）")
         rows = self._fetch_price_data()
         if rows:
@@ -39,14 +31,6 @@ class UsStockFetcher:
             logging.warning(f"{_TICKER} 股價資料為空，略過")
 
     def _fetch_price_data(self) -> list:
-        """
-        從 yfinance 抓 VOO 歷史日線資料。
-        回傳 list of dict，每筆對應一個交易日。
-        漲跌 change = 當日收盤 - 前一日收盤。
-
-        yfinance 在 rate limit 期間 internal state 可能為 None，
-        導致 'NoneType' object is not subscriptable，需 retry。
-        """
         start = (date.today() - relativedelta(months=US_STOCK_MONTHS)).strftime("%Y-%m-%d")
 
         hist = None
@@ -89,7 +73,6 @@ class UsStockFetcher:
         return rows
 
     def _save(self, rows: list) -> None:
-        """寫入 us_stock_prices，重複 trade_date 自動略過"""
         with get_pg() as conn:
             with conn.cursor() as cur:
                 for row in tqdm(rows, desc=f"{_TICKER} 寫入", file=sys.stderr, leave=False):

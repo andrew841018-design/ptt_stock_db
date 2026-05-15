@@ -1,0 +1,73 @@
+version: 2
+
+sources:
+  - name: raw_ptt
+    description: "EL+T raw layer for PTT sentiment project. Append-only. Cleaning happens in stg_*_v2."
+    schema: "{{ target.schema }}"
+    tables:
+      - name: raw_articles
+        description: "Append-only raw scraper payload (JSONB)."
+        columns:
+          - name: raw_id
+            tests: [unique, not_null]
+          - name: source_name
+            tests: [not_null]
+          - name: raw_payload
+            tests: [not_null]
+          - name: ingested_at
+            tests: [not_null]
+      - name: raw_sentiment_scores
+        description: "Append-only raw BERT sentiment scores."
+        columns:
+          - name: raw_id
+            tests: [unique, not_null]
+          - name: raw_payload
+            tests: [not_null]
+      - name: raw_sources
+        description: "Append-only raw source master payloads."
+        columns:
+          - name: raw_id
+            tests: [unique, not_null]
+          - name: source_name
+            tests: [not_null]
+
+models:
+  - name: stg_articles_v2
+    description: "v2 staging (Phase 2a): cleaned articles from raw_articles JSONB. PII hashed, deduped, multi-format date parsed."
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "author_hash is null or length(author_hash) = 16"
+          config:
+            severity: warn
+    columns:
+      - name: article_id
+        description: "SERIAL int from MIN(raw_id) OVER (PARTITION BY url) — canonical row's raw_id wins, stable per URL"
+        tests: [not_null, unique]
+      - name: url
+        tests: [not_null, unique]
+      - name: source_name
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ptt', 'cnyes', 'reddit', 'cnn', 'wsj', 'marketwatch', 'wayback_cnn', 'wayback_wsj']
+      - name: author_hash
+      - name: published_at
+      - name: scraped_at
+
+  - name: stg_sentiment_scores_v2
+    description: "v2 staging: cleaned BERT sentiment scores from raw_sentiment_scores."
+    columns:
+      - name: score_id
+        tests: [not_null, unique]
+      - name: article_id_raw
+        tests: [not_null]
+      - name: score
+        tests: [not_null]
+
+  - name: stg_sources_v2
+    description: "v2 staging: cleaned source master."
+    columns:
+      - name: source_id
+        tests: [not_null, unique]
+      - name: source_name
+        tests: [not_null, unique]

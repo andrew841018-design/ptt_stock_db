@@ -1,7 +1,22 @@
 {{ config(materialized='table') }}
 
--- Data Mart：直接供 API / 儀表板查詢的預聚合表
--- 粒度：(fact_date × source_id)
+{% if var('use_v2_pipeline', false) %}
+
+SELECT
+    fact_date,
+    source_name,
+    article_count,
+    pos_count,
+    neg_count,
+    neu_count,
+    avg_score,
+    pos_ratio,
+    neg_ratio
+FROM {{ ref('mart_daily_summary_v2') }}
+ORDER BY fact_date DESC, article_count DESC
+
+{% else %}
+
 SELECT
     fact_date,
     source_id,
@@ -15,3 +30,5 @@ SELECT
     CAST(neg_count AS {{ dbt.type_float() }}) / NULLIF(article_count, 0) AS neg_ratio
 FROM {{ ref('fact_sentiment') }}
 ORDER BY fact_date DESC, article_count DESC
+
+{% endif %}

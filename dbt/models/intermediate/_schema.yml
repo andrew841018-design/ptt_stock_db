@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: int_articles_with_sentiment
+    description: "Intermediate (Phase 2a): stg_articles_v2 LEFT JOIN stg_sentiment_scores_v2. One row per article + optional sentiment_score."
+    columns:
+      - name: article_id
+        description: "SERIAL int from stg_articles_v2"
+        tests: [not_null, unique]
+      - name: url
+        tests: [not_null]
+      - name: source_name
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ptt', 'cnyes', 'reddit', 'cnn', 'wsj', 'marketwatch', 'wayback_cnn', 'wayback_wsj']
+      - name: sentiment_score
+        description: "BERT score; nullable when article has no sentiment row yet"
+
+  - name: int_market_summary
+    description: "Intermediate (Phase 2a): int_articles_with_sentiment + stg_sources_v2 + market_code (US/TW)."
+    columns:
+      - name: article_id
+        tests: [not_null, unique]
+      - name: source_name
+        tests: [not_null]
+      - name: market_code
+        description: "US or TW; NULL means source not in macro mapping (shouldn't happen given accepted_values on upstream)"
+        tests:
+          - accepted_values:
+              values: ['US', 'TW']
+              config:
+                severity: warn

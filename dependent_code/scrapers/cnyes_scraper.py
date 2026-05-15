@@ -10,26 +10,11 @@ from config import SOURCES
 
 _SOURCE = SOURCES["cnyes"]
 
-# 鉅亨網公開 API
 _API_BASE = "https://api.cnyes.com/media/api/v1"
 
 
 class CnyesScraper(BaseScraper):
-    """
-    鉅亨網台股新聞爬蟲。
-    鉅亨網提供 REST API（JSON），回傳新聞列表。
 
-    分頁機制：
-      GET /newslist/category/tw_stock?page=1&limit=30
-      page 從 1 開始遞增。
-
-    特性：
-      - 新聞沒有留言，comments 填 []
-      - 沒有推/噓，push_count 填 None
-      - content 為 HTML，需用 BeautifulSoup 轉純文字
-    """
-
-    # EARLY_STOP_PAGES 走 config（ptt / cnyes 共用）
     from config import EARLY_STOP_EMPTY_PAGES as EARLY_STOP_PAGES
 
     def get_source_info(self) -> dict:
@@ -39,8 +24,6 @@ class CnyesScraper(BaseScraper):
         known_urls = self._load_urls()
         logging.info(f"鉅亨網載入已知 URL：{len(known_urls)} 筆")
 
-        # 多 category 爬（API 每個 category 只 index 最新 ~1000-2000 篇）
-        # 取代單一 tw_stock，覆蓋 ~3 倍量
         categories = _SOURCE.get("categories", ["tw_stock"])
         articles = []
 
@@ -54,7 +37,6 @@ class CnyesScraper(BaseScraper):
 
 
     def _fetch_category(self, category: str, known_urls: set) -> list:
-        """爬單一 category 所有頁，遇 EARLY_STOP_PAGES 連空頁停。"""
         articles = []
         consecutive_empty_pages = 0
 
@@ -91,10 +73,6 @@ class CnyesScraper(BaseScraper):
 
 
     def _fetch_news_list(self, category: str, page: int) -> list:
-        """
-        取得一頁新聞列表，回傳 items list。
-        API 回傳格式：{"items": {"data": [...], "total": N, "per_page": N, ...}}
-        """
         params = {"page": page, "limit": _SOURCE["page_size"]}
         response = self._get_with_retry(
             f"{_API_BASE}/newslist/category/{category}",
@@ -104,26 +82,6 @@ class CnyesScraper(BaseScraper):
         return data.get("items", {}).get("data", [])
 
     def _parse_news_item(self, item: dict, known_urls: set) -> Optional[dict]:
-        """
-        將 API 回傳的單筆新聞轉成標準格式。
-        content 是 HTML，用 BeautifulSoup 取純文字。
-
-        item 欄位（API 實際回傳）：
-          newsId       int     新聞 ID（用來組 URL）
-          title        str     標題
-          summary      str     摘要（純文字）
-          content      str     內文（HTML）
-          publishAt    int     發布時間（Unix timestamp，秒）
-          source       str     來源（可能為 None）
-          keyword      list    關鍵字列表
-          market       list    相關股票 [{'code': '2330', 'name': '台積電', ...}]
-          categoryId   int     分類 ID
-          categoryName str     分類名稱（e.g. '台股新聞'）
-          coverSrc     str     封面圖（可能為 None）
-          payment      int     是否付費（0=免費）
-          fbShare      int     FB 分享數
-          fbComment    int     FB 留言數
-        """
         news_id      = item.get("newsId")
         if not news_id:
             return None
@@ -137,20 +95,18 @@ class CnyesScraper(BaseScraper):
         if not html_content or not publish_at:
             return None
 
-        # HTML → 純文字
-        # get_text(separator="\n") 移除所有 HTML 標籤，只保留文字
         content = BeautifulSoup(html_content, "html.parser").get_text(separator="\n").strip()
 
         article = {
             "title":        (item.get("title") or "").strip(),
             "content":      content,
             "url":          url,
-            "author":       item.get("author"),          # 記者名稱，可能為 None
+            "author":       item.get("author"),
             "published_at": self.ts_to_dt(
-                                item["publishAt"]        # 鉅亨網時間戳是秒，統一轉 UTC
+                                item["publishAt"]
                             ),
-            "push_count":   None,  # 新聞無推文數
-            "comments":     [],    # 新聞無留言
+            "push_count":   None,
+            "comments":     [],
         }
         if not self.validate_article(article, "cnyes"):
             return None

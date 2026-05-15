@@ -1,8 +1,3 @@
-"""
-WSJ（華爾街日報）Markets/Business 爬蟲。
-使用 WSJ Google News sitemap 直接取得文章列表。
-WSJ 有 paywall，全文無法免費取得，嘗試後 fallback 到 sitemap 標題。
-"""
 
 import logging
 import requests
@@ -25,7 +20,6 @@ _NS = {
 
 
 class WsjScraper(BaseScraper):
-    """WSJ 爬蟲：sitemap → 嘗試抓全文 → paywall 時 fallback 到標題。"""
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}

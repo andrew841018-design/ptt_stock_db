@@ -1,6 +1,4 @@
 #!/bin/bash
-# EC2 modernization setup script
-# Run on EC2 as ubuntu user: bash ec2_setup.sh
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
@@ -21,7 +19,6 @@ sudo apt-get install -y -qq \
     git \
     fonts-noto-cjk \
     fonts-noto-cjk-extra
-# 清掉舊的 matplotlib 字型 cache，讓下次 import 重建並收錄 Noto CJK
 rm -f /home/ubuntu/.cache/matplotlib/fontlist-*.json 2>/dev/null || true
 
 log "=== Phase 3: Enable Docker service ==="

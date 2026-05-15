@@ -1,7 +1,3 @@
-"""
-PII Masking — author 欄位 hash 化
-將 PTT 使用者 ID 轉為不可逆的 SHA-256 hash，保護個資。
-"""
 
 import hashlib
 import logging
@@ -13,7 +9,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 def hash_author(author: str) -> Optional[str]:
-    """將 author 加鹽後做 SHA-256 hash，取前 16 碼"""
     if not author:
         return None
     salted = f"{PII_HASH_SALT}:{author}"
@@ -21,11 +16,6 @@ def hash_author(author: str) -> Optional[str]:
 
 
 def mask_articles_author() -> int:
-    """
-    批次將 articles.author 欄位 hash 化。
-    只處理尚未 hash 的資料（hash 輸出固定 16 碼，長度 != 16 表示尚未 hash）。
-    回傳更新筆數。
-    """
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -50,11 +40,6 @@ def mask_articles_author() -> int:
 
 
 def mask_comments_author() -> int:
-    """
-    批次將 comments.author 欄位 hash 化。
-    只處理尚未 hash 的資料（hash 輸出固定 16 碼，長度 != 16 表示尚未 hash）。
-    回傳更新筆數。
-    """
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -79,7 +64,6 @@ def mask_comments_author() -> int:
 
 
 def run() -> None:
-    """遮蔽 articles + comments 的 author 欄位"""
     a = mask_articles_author()
     c = mask_comments_author()
     logging.info("PII masking 完成：articles %d 筆, comments %d 筆", a, c)

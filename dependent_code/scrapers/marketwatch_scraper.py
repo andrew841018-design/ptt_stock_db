@@ -1,8 +1,3 @@
-"""
-MarketWatch 財經新聞爬蟲。
-使用 MarketWatch 官方 sitemap 直接取得文章列表。
-MarketWatch 文章頁自 2026 年起回 401 Forbidden，直接以 sitemap 標題作為 content。
-"""
 
 import logging
 import xml.etree.ElementTree as ET
@@ -15,8 +10,6 @@ from config import SOURCES, DEFAULT_HEADERS as _HEADERS
 _SOURCE = SOURCES["marketwatch"]
 
 _SITEMAP_URLS = [
-    # 2026-04-24: MarketWatch 停用分頁版 sitemap（_1.xml / _2.xml 最後更新於 04-22），
-    # 改回單檔版 mw_news_sitemap.xml（robots.txt 官方列出的 URL）
     "https://www.marketwatch.com/mw_news_sitemap.xml",
 ]
 
@@ -27,7 +20,6 @@ _NS = {
 
 
 class MarketWatchScraper(BaseScraper):
-    """MarketWatch 爬蟲：兩個 sitemap → 合併去重 → 標題作 content（paywall）。"""
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -68,8 +60,6 @@ class MarketWatchScraper(BaseScraper):
         return articles
 
     def _fetch_sitemap(self, sitemap_url: str) -> list:
-        """支援 sitemap index（含子 sitemap）與直接 urlset 兩種結構。
-        2026-04-25：MarketWatch 把 mw_news_sitemap.xml 改成 sitemap index 包子 sitemap。"""
         try:
             response = self._get_with_retry(sitemap_url, headers=_HEADERS)
             root = ET.fromstring(response.content)
@@ -77,7 +67,6 @@ class MarketWatchScraper(BaseScraper):
             logging.warning("MarketWatch sitemap 解析失敗 %s：%s", sitemap_url, e)
             return []
 
-        # sitemapindex → 遞迴抓所有子 sitemap
         if root.tag.endswith("}sitemapindex") or root.tag == "sitemapindex":
             entries = []
             for sm in root.findall("sm:sitemap", _NS):
@@ -87,7 +76,6 @@ class MarketWatchScraper(BaseScraper):
             logging.info("MarketWatch sitemap index 展開為 %d 個子 sitemap", len(root.findall("sm:sitemap", _NS)))
             return entries
 
-        # 直接 urlset
         entries = []
         for url_elem in root.findall("sm:url", _NS):
             loc     = url_elem.findtext("sm:loc",                         namespaces=_NS) or ""

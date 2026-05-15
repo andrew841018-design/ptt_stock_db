@@ -1,18 +1,3 @@
-"""
-reparse.py — 資料修復管線
-
-流程：
-  1. diagnose()  掃 PostgreSQL，找出有 NULL 關鍵欄位的文章
-  2. 用 URL 從 MongoDB raw_responses 取回原始 HTTP 回應
-  3. 依來源 re-parse 出正確值（支援所有來源；新增來源見 _REPARSERS + _HTML_CONTENT_SELECTORS）
-  4. UPDATE PostgreSQL（只更新非 None 的欄位，不覆蓋好資料）
-  5. 回傳 {"repaired": N}
-
-使用方式：
-  from reparse import repair
-  result = repair()
-  print(result["repaired"])
-"""
 
 import json
 import logging
@@ -28,12 +13,8 @@ from pg_helper import get_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 每次最多修復的筆數（避免一次佔用太多資源）
 _BATCH_SIZE = 500
 
-# ─── 通用 HTML 新聞 re-parse 設定 ──────────────────────────────────────
-# 來源 → 內文容器 CSS 選擇器（依優先順序嘗試，第一個命中就用）
-# 新增 HTML 新聞來源：加一筆 entry 到這裡 + 一行到 _REPARSERS
 _HTML_CONTENT_SELECTORS = {
     "cnn": [
         "div.article__content",
@@ -55,10 +36,6 @@ _HTML_CONTENT_SELECTORS = {
 
 
 def diagnose() -> list[dict]:
-    """
-    掃 PostgreSQL，回傳有 NULL 關鍵欄位的文章清單。
-    每筆格式：{"article_id": int, "url": str, "source_name": str, "bad_fields": list[str]}
-    """
     bad_articles = []
     null_columns = ("title", "content", "published_at")
 
@@ -77,7 +54,6 @@ def diagnose() -> list[dict]:
             rows = cursor.fetchall()
 
     for row in rows:
-        # article_id=row[0], url=row[1], source_name=row[2], *values=row[3:]
         article_id, url, source_name, *values = row
         bad_fields = [col for col, val in zip(null_columns, values) if val is None]
         bad_articles.append({
@@ -92,10 +68,6 @@ def diagnose() -> list[dict]:
 
 
 def _reparse_ptt(raw_doc: dict, url: str) -> Optional[dict]:
-    """
-    從 MongoDB raw_doc 的 raw_html 重新解析 PTT 文章內頁。
-    回傳可用於 UPDATE 的 dict（只含非 None 的欄位）。
-    """
     raw_html = raw_doc.get("raw_html")
     if not raw_html:
         return None
@@ -105,7 +77,6 @@ def _reparse_ptt(raw_doc: dict, url: str) -> Optional[dict]:
     if not main_content:
         return None
 
-    # 推文先取，再 decompose
     comments = []
     for push in main_content.find_all("div", class_="push"):
         user_id  = push.find("span", class_="push-userid")
@@ -135,7 +106,6 @@ def _reparse_ptt(raw_doc: dict, url: str) -> Optional[dict]:
     ]
     content = "\n".join(lines) or None
 
-    # published_at 從 URL 中的 Unix timestamp 提取
     published_at = None
     match = re.search(r'M\.(\d+)\.', url)
     if match:
@@ -151,11 +121,6 @@ def _reparse_ptt(raw_doc: dict, url: str) -> Optional[dict]:
 
 
 def _reparse_cnyes(raw_doc: dict, url: str) -> Optional[dict]:
-    """
-    從 MongoDB raw_doc 的 raw_json 重新解析鉅亨網文章。
-    raw_json 是 API list 回應，需找到與 url 匹配的 newsId。
-    回傳可用於 UPDATE 的 dict（只含非 None 的欄位）。
-    """
     raw_json_str = raw_doc.get("raw_json")
     if not raw_json_str:
         return None
@@ -165,7 +130,6 @@ def _reparse_cnyes(raw_doc: dict, url: str) -> Optional[dict]:
     except (json.JSONDecodeError, TypeError):
         return None
 
-    # url 格式：https://news.cnyes.com/news/id/{newsId}
     news_id_match = re.search(r'/news/id/(\d+)', url)
     if not news_id_match:
         return None
@@ -196,11 +160,6 @@ def _reparse_cnyes(raw_doc: dict, url: str) -> Optional[dict]:
 
 
 def _reparse_reddit(raw_doc: dict, url: str) -> Optional[dict]:
-    """
-    從 MongoDB raw_doc 的 raw_json 重新解析 Reddit 貼文。
-    raw_json 是 Reddit API listing 回應，需找到與 url 匹配的 post。
-    回傳可用於 UPDATE 的 dict（只含非 None 的欄位）。
-    """
     raw_json_str = raw_doc.get("raw_json")
     if not raw_json_str:
         return None
@@ -210,13 +169,11 @@ def _reparse_reddit(raw_doc: dict, url: str) -> Optional[dict]:
     except (json.JSONDecodeError, TypeError):
         return None
 
-    # url 格式：https://www.reddit.com/r/investing/comments/{post_id}/{title_slug}/
     post_id_match = re.search(r'/comments/(\w+)/', url)
     if not post_id_match:
         return None
     target_id = post_id_match.group(1)
 
-    # Reddit API response：{"data": {"children": [{"data": {post fields...}}]}}
     children = data.get("data", {}).get("children", [])
     post = next(
         (child["data"] for child in children
@@ -253,7 +210,6 @@ def _reparse_reddit(raw_doc: dict, url: str) -> Optional[dict]:
 
 
 def _parse_iso_datetime(date_str: str) -> Optional[datetime]:
-    """解析 ISO 8601 日期字串，回傳 datetime；失敗回傳 None。"""
     if not date_str:
         return None
     formats = [
@@ -273,26 +229,12 @@ def _parse_iso_datetime(date_str: str) -> Optional[datetime]:
 
 
 def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[dict]:
-    """
-    通用 HTML 新聞文章 re-parse（CNN / WSJ / MarketWatch 等共用）。
-    從 MongoDB raw_html 重新解析 title / content / published_at。
-
-    新增 HTML 新聞來源只需在 _HTML_CONTENT_SELECTORS 加 CSS 選擇器。
-
-    複雜度說明（cyclomatic complexity ~33）：
-        多分支是**本質複雜度**，非 bad smell — 3 個新聞來源各自 DOM 結構不同，
-        每個 selector list 需要逐項 try 直到命中。重構為 dispatcher pattern
-        (_PARSERS = {'cnn': _parse_cnn, ...}) 在來源 ≥ 5 時才有 ROI，目前 3 來源
-        inline 反而較易追蹤（一眼看出哪個 selector 該補）。
-
-    """
     raw_html = raw_doc.get("raw_html")
     if not raw_html:
         return None
 
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    # ── content：依 CSS 選擇器優先順序找容器 ──
     selectors = _HTML_CONTENT_SELECTORS.get(source_name, [])
     paragraphs = []
     for selector in selectors:
@@ -310,7 +252,6 @@ def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[di
     )
     content = content if content else None
 
-    # ── title：og:title → <h1> ──
     title = None
     og_title = soup.find("meta", property="og:title")
     if og_title:
@@ -321,7 +262,6 @@ def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[di
             title = h1.get_text(strip=True)
     title = title or None
 
-    # ── published_at：meta tag → JSON-LD ──
     published_at = None
     for attr in ("property", "name"):
         for meta_name in ("article:published_time", "publishdate", "datePublished"):
@@ -355,10 +295,6 @@ def _reparse_html_news(raw_doc: dict, url: str, source_name: str) -> Optional[di
     return result or None
 
 
-# ─── re-parser 註冊表 ─────────────────────────────────────────────────
-# 新增來源：
-#   HTML 新聞站 → 在 _HTML_CONTENT_SELECTORS 加 CSS 選擇器，再在這裡加一行 lambda
-#   特殊格式   → 寫一個 _reparse_xxx(raw_doc, url) 函式，在這裡加一行
 _REPARSERS = {
     "ptt":         _reparse_ptt,
     "cnyes":       _reparse_cnyes,
@@ -370,14 +306,9 @@ _REPARSERS = {
 
 
 def _update_article(article_id: int, fields: dict) -> None:
-    """UPDATE articles 表，只更新 fields 中非 None 的欄位"""
     if not fields:
         return
-    # for col in fields 只取 dict 的 key（欄位名），用來組 SQL SET 子句
-    # fields = {"title": "...", "content": "..."} 
     set_clause = ", ".join(f"{col} = %s" for col in fields)
-    # .values() 取 dict 的所有 value，尾巴加上 article_id 對應 WHERE 的 %s
-    # ["...", "...", 42] → 依序對應 SET 裡的兩個 %s 和 WHERE 的一個 %s
     values = list(fields.values()) + [article_id]
     with get_pg() as conn:
         with conn.cursor() as cursor:
@@ -388,15 +319,6 @@ def _update_article(article_id: int, fields: dict) -> None:
 
 
 def repair() -> dict:
-    """
-    主修復函式。
-    1. 找出有 NULL 關鍵欄位的文章
-    2. 從 MongoDB raw_responses 取回原始回應
-    3. 依來源 re-parse
-    4. UPDATE PostgreSQL
-
-    回傳：{"repaired": N}
-    """
     bad_articles = diagnose()
     if not bad_articles:
         logging.info("[reparse] 無需修復")
@@ -411,7 +333,6 @@ def repair() -> dict:
             url         = article["url"]
             source_name = article["source_name"]
             article_id  = article["article_id"]
-            # find_one第一筆是條件，第二筆是回傳的欄位，_id:0是不要回傳_id
             raw_doc = col.find_one({"url": url}, {"_id": 0})
             if not raw_doc:
                 logging.debug("[reparse] MongoDB 無 raw：%s", url)

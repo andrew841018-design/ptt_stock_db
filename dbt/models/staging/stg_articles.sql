@@ -1,6 +1,5 @@
 {{ config(materialized='view') }}
 
--- staging：跨 adapter 型別投射 + 欄位命名統一
 SELECT
     CAST(article_id   AS {{ dbt.type_int() }})       AS article_id,
     CAST(source_id    AS {{ dbt.type_int() }})       AS source_id,

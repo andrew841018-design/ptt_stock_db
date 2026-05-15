@@ -1,10 +1,3 @@
-"""
-CNN Business/Markets 新聞爬蟲。
-雙層 sitemap：
-  - news.xml：滾動視窗（最近 ~120 篇），含完整 metadata（title / published_at）
-  - 月份 business sitemap：當月～上月整月財經文章 URL（CNN 把 tech/economy/markets 都歸在 business 下），metadata 由 article 頁面補
-CNN 個別文章頁為 SSR，可靜態解析全文。
-"""
 
 import logging
 import re
@@ -36,7 +29,6 @@ _URL_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/")
 
 
 class CnnScraper(BaseScraper):
-    """CNN 爬蟲：news.xml + 月份 business sitemap → 過濾財經路徑 → 抓全文。"""
 
     def get_source_info(self) -> dict:
         return {"name": _SOURCE["name"], "url": _SOURCE["url"]}
@@ -86,7 +78,6 @@ class CnnScraper(BaseScraper):
         return articles
 
     def _fetch_sitemap(self) -> list:
-        """合併 news.xml（完整 metadata）+ 月份 business sitemap（補 URL）。"""
         entries_by_url: dict = {}
 
         try:
@@ -144,7 +135,6 @@ class CnnScraper(BaseScraper):
             return None
 
     def _fetch_article_full(self, url: str) -> Optional[dict]:
-        """一次抓 title + published_at + content（給月份 sitemap 來的 URL）。"""
         try:
             response = self._get_with_retry(url, headers=_HEADERS, timeout=10)
             soup = BeautifulSoup(response.text, "html.parser")
@@ -182,7 +172,6 @@ class CnnScraper(BaseScraper):
 
 
 def _month_sitemap_urls() -> list:
-    """本月 + 月初 3 日內回溯上月（避免月初剛換月時錯過上月尾文章）。"""
     today = datetime.utcnow()
     months = [today]
     if today.day <= 3:
@@ -194,7 +183,6 @@ def _month_sitemap_urls() -> list:
 
 
 def _published_at_from_url(url: str) -> Optional[datetime]:
-    """從 cnn.com/YYYY/MM/DD/ slug 推發布日期。"""
     m = _URL_DATE_RE.search(url)
     if not m:
         return None

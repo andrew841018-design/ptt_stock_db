@@ -16,14 +16,12 @@ from config import (
 from data_mart import get_daily_sentiment
 from auth import create_token, verify_token, authenticate_user
 
-# ── Prometheus metrics（真實接線）─────────────────────────────────────────────
 from metrics import api_request_duration_seconds
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 CACHE_KEY_ARTICLES = "articles_df"
 
 
-# ── Response Models ────────────────────────────────────────────────────────────
 
 class TodaySentimentResponse(BaseModel):
     date: str
@@ -48,7 +46,6 @@ class TopPushArticleItem(BaseModel):
 class TopPushResponse(BaseModel):
     note: str
     limit: int
-    # 會驗證list內是否是裝TopPushArticleItem的dict，通常回傳dict才會以此行是定義
     articles: list[TopPushArticleItem]
     message: str
 
@@ -73,14 +70,14 @@ class SentimentVsStockPriceResponse(BaseModel):
 
 class AIModelPredictionDailyPoint(BaseModel):
     date: datetime.date
-    strategy_cumulative_return: float   # 1.025 = +2.5%
+    strategy_cumulative_return: float
     buy_and_hold_return: float
 
 class AIModelPredictionResponse(BaseModel):
     market: str
     display_name: str
     accuracy: float
-    strategy_cumulative_return: float   # 最終值（1.025 = +2.5%）
+    strategy_cumulative_return: float
     buy_and_hold_return: float
     sample_days: int
     daily: list[AIModelPredictionDailyPoint]
@@ -106,31 +103,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PTT Stock Sentiment API", description="JWT 保護的情緒分析 API", lifespan=lifespan)
 
-# ── Prometheus metrics 接線 ────────────────────────────────────────────────────
-# 啟動 /metrics endpoint（同 port 共用）+ request duration middleware。
-# 用 request.scope["route"].path 取 URL pattern 而非實際 URL，**避免 cardinality 爆炸**
-# （若用 request.url.path，/articles/search?q=xxx 每個 query 都是一個 label → Prometheus 記憶體爆）
 
 @app.middleware("http")
 async def _prom_middleware(request: Request, call_next):
-    """記每次 request 的耗時（用 endpoint pattern 作 label，不用實際 URL）"""
     start = time.perf_counter()
-    response = await call_next(request)  # 執行實際 endpoint，拿到完整 HTTP 回應
-    elapsed = time.perf_counter() - start  # 計算耗時（秒）
-    # 取 route pattern（如 /articles/{id}）而非實際 URL（如 /articles/123）
-    # 避免每個不同 URL 都產生一個 label → Prometheus cardinality 爆炸
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
     route = request.scope.get("route")
     endpoint = getattr(route, "path", request.url.path) if route else request.url.path
-    api_request_duration_seconds.labels(endpoint=endpoint).observe(elapsed)  # 寫入 Histogram
-    return response  # 原封不動回傳給 client，middleware 只負責計時不修改內容
+    api_request_duration_seconds.labels(endpoint=endpoint).observe(elapsed)
+    return response
 
 
-@app.get("/metrics", include_in_schema=False)  # include_in_schema=False：不出現在 Swagger UI
+@app.get("/metrics", include_in_schema=False)
 def metrics_endpoint():
-    """Prometheus scrape endpoint（文字格式，不進 Swagger）"""
-    # generate_latest()：把記憶體裡所有 metrics 序列化成 Prometheus 文字格式
-    # Prometheus 每 15 秒打這個 endpoint 一次，把數字抓走存進時序資料庫
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)  # CONTENT_TYPE_LATEST = text/plain; version=0.0.4
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 PERIOD_MIN         = 1
@@ -141,11 +128,9 @@ ARTICLE_PERIOD_MIN = 1
 ARTICLE_PERIOD_MAX = 365
 
 
-# ── Auth Endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/auth/login", response_model=LoginResponse)
 def login(req: LoginRequest) -> LoginResponse:
-    """帳密驗證 → 回傳 JWT token"""
     user = authenticate_user(req.username, req.password)
     token = create_token(user["username"], user["role"])
     return {
@@ -155,10 +140,8 @@ def login(req: LoginRequest) -> LoginResponse:
     }
 
 
-# ── Data Loading（articles 個別資料，top_push / search 用）────────────────────
 
 def load_articles_df() -> pd.DataFrame:
-    """讀取文章資料（JOIN sentiment_scores），Cache-Aside：先查 Redis，沒有再查 DB"""
     df = get_cache(CACHE_KEY_ARTICLES)
     if df is not None:
         return df
@@ -181,26 +164,27 @@ def load_articles_df() -> pd.DataFrame:
         set_cache(CACHE_KEY_ARTICLES, df)
         return df
     except Exception:
-        # 不把原始 DB 錯誤訊息吐給客戶端（可能暴露 schema/column），僅 server log
         logging.exception("[API] load_articles_df 失敗")
         raise HTTPException(status_code=500, detail={"message": "database search failed"})
 
 
 def _aggregate_by_date(rows: list) -> dict:
-    """fn_get_daily_sentiment 回傳 (date, source) 多列；以 total_articles 加權，回各日期單一聚合分數。"""
     by_date: dict = {}
     for r in rows:
         d = r["summary_date"]
+        if "scored_articles" in r and r["scored_articles"] is not None:
+            weight = r["scored_articles"]
+        else:
+            weight = r["total_articles"]
         slot = by_date.setdefault(d, {"total": 0, "weighted": 0.0})
-        slot["total"] += r["total_articles"]
-        slot["weighted"] += float(r["avg_sentiment"]) * r["total_articles"]
+        slot["total"] += weight
+        slot["weighted"] += float(r["avg_sentiment"]) * weight
     return by_date
 
 
 @app.get("/sentiments/today", response_model=TodaySentimentResponse)
-# Depends(verify_token) 表示這個function需要一個JWT token，如果沒有token，會返回401錯誤
 def get_today_sentiment(user: dict = Depends(verify_token)) -> TodaySentimentResponse:
-    rows = get_daily_sentiment(days=7)  # 取近 7 天，拿最新一天
+    rows = get_daily_sentiment(days=7)
     if not rows:
         raise HTTPException(status_code=404, detail={"message": "No data for today"})
     by_date = _aggregate_by_date(rows)
@@ -216,7 +200,7 @@ def get_today_sentiment(user: dict = Depends(verify_token)) -> TodaySentimentRes
 
 @app.get("/sentiments/change", response_model=ChangeSentimentResponse)
 def get_change_sentiment(user: dict = Depends(verify_token)) -> ChangeSentimentResponse:
-    rows = get_daily_sentiment(days=7)  # 取近 7 天，拿最新兩天比較
+    rows = get_daily_sentiment(days=7)
     by_date = _aggregate_by_date(rows)
     if len(by_date) < 2:
         raise HTTPException(status_code=404, detail={"message": "No data for today or yesterday"})
@@ -234,10 +218,13 @@ def get_recent_sentiment_score(period: int = Query(default=10, ge=PERIOD_MIN, le
     rows = get_daily_sentiment(days=period)
     if not rows:
         raise HTTPException(status_code=404, detail={"message": f"No data for the past {period} days"})
-    # 加權平均：各天 avg_sentiment × total_articles，再除以總文章數
-    total_articles = sum(r["total_articles"] for r in rows)
-    weighted_sum   = sum(float(r["avg_sentiment"]) * r["total_articles"] for r in rows)
-    recent_score   = round(weighted_sum / total_articles, 2)
+    weights = [
+        r["scored_articles"] if ("scored_articles" in r and r["scored_articles"] is not None) else r["total_articles"]
+        for r in rows
+    ]
+    total_weight = sum(weights)
+    weighted_sum = sum(float(r["avg_sentiment"]) * w for r, w in zip(rows, weights))
+    recent_score = round(weighted_sum / total_weight, 2) if total_weight else 0.0
     return {"period": period, "sentiment_score": recent_score, "message": "Success"}
 
 
@@ -256,7 +243,6 @@ def get_top_push_articles(
     """
     df = df.copy()
     df['Published_Date'] = df['Published_Time'].dt.date
-    # filter by period
     end_date  = df['Published_Date'].max()
     days_map  = {"day": 1, "week": 7, "month": 30, "year": 365}
     total_days = period * days_map[period_type]
@@ -274,34 +260,26 @@ def get_top_push_articles(
 
 
 @app.get("/articles/search", response_model=SearchResponse)
-# ...表示必填，使用者不填入內容會出錯
 def search_articles(keyword: str, user: dict = Depends(verify_token)) -> SearchResponse:
     df = load_articles_df()
     if len(df) == 0:
         raise HTTPException(status_code=404, detail={"message": "No data found"})
-    # case=False-表示不區分大小寫，na=False-表示不處理缺失值
-    result = df[df['Title'].str.contains(keyword, case=False, na=False)].copy()
+    result = df[df['Title'].str.contains(keyword, case=False, na=False, regex=False)].copy()
     if len(result) == 0:
         raise HTTPException(status_code=404, detail={"message": "No related articles"})
-    # 非 PTT 來源（CNN/WSJ/cnyes 等）沒有 push_count → NaN，response model 拒絕；統一填 0
     result['Push_count'] = result['Push_count'].fillna(0).astype(int)
     return {"search_articles": result[['Title', 'Push_count', 'Published_Time', 'Url']].to_dict(orient="records"), "message": "Success"}
 
 
 @app.get("/correlation/0050", response_model=SentimentVsStockPriceResponse)
 def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=1, le=365), user: dict = Depends(verify_token)):
-    """
-    PTT 情緒分數 vs 0050 隔日漲跌。
-    改用 mart_daily_summary（pre-computed），不再即時 JOIN articles + sentiment_scores。
-    """
     try:
         with get_pg_pooled() as conn:
-            # %s 不能放在字串字面量裡（psycopg2 不會展開），改用 (%s * INTERVAL '1 day')
             df = pd.read_sql_query(f"""
                 SELECT
                     m.summary_date         AS sentiment_date,
-                    SUM(m.avg_sentiment * m.total_articles)
-                        / NULLIF(SUM(m.total_articles), 0)
+                    SUM(m.avg_sentiment * m.scored_articles)
+                        / NULLIF(SUM(m.scored_articles), 0)
                                            AS avg_sentiment,
                     sp.change              AS next_day_change
                 FROM mart_daily_summary m
@@ -324,14 +302,9 @@ def get_sentiment_vs_stock_price_correlation(period: int = Query(default=30, ge=
 
 @app.get("/ai_model_prediction/{market}", response_model=AIModelPredictionResponse)
 def get_ai_model_prediction(market: str, user: dict = Depends(verify_token)) -> AIModelPredictionResponse:
-    """
-    Walk-Forward AI 模型預測結果。即時重算，不走快取（MLflow + ai_model_prediction_runs 有歷史）。
-    市場：tw（0050）/ us（VOO）
-    """
     if market not in ("tw", "us"):
         raise HTTPException(status_code=400, detail={"message": "market must be 'tw' or 'us'"})
 
-    # lazy import：ai_model_prediction 拖 sklearn + torch，放 module-level 會拖慢 FastAPI 啟動
     from ai_model_prediction import run_ai_model_prediction, MARKET_CONFIG
     df = run_ai_model_prediction(market)
     if df is None or df.empty:
@@ -353,11 +326,10 @@ def get_ai_model_prediction(market: str, user: dict = Depends(verify_token)) -> 
 
 @app.get("/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
-    """公開 endpoint，不需要 JWT token"""
     try:
         with get_pg_pooled() as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT 1")#測試用語法，確認db活著
+                cursor.execute("SELECT 1")
     except Exception:
         logging.exception("[API] health check DB 連線失敗")
         raise HTTPException(status_code=500, detail={"message": "database connection failed"})

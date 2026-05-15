@@ -5,36 +5,15 @@ from scrapers.base_scraper import BaseScraper
 from config import SOURCES
 
 _SOURCE     = SOURCES["reddit"]
-_SUBREDDITS = _SOURCE["subreddits"]  # "investing+stocks+wallstreetbets"（Reddit API 支援 + 合併語法）
+_SUBREDDITS = _SOURCE["subreddits"]
 
-# Reddit 公開 JSON API，不需要 API key
-# 需要 User-Agent 否則會被 rate limit（429）
 _HEADERS    = {"User-Agent": "ptt-sentiment-bot/1.0"}
 _BASE_URL   = "https://www.reddit.com/r/{subreddits}/new.json"
-_PAGE_LIMIT = 100  # Reddit API 每頁上限（硬性限制，不可超過）
+_PAGE_LIMIT = 100
 
 
 class RedditScraper(BaseScraper):
-    """
-    Reddit 財經版爬蟲（r/investing + r/stocks + r/wallstreetbets）。
 
-    設計說明：
-      - 繼承 BaseScraper，DB 寫入邏輯統一由 base 處理
-      - 使用 Reddit 公開 JSON API（不需要 API key，限制：每分鐘 60 次請求）
-      - 分頁：cursor-based（after），格式為 "t3_{post_id}"
-      - 每頁最多 100 筆貼文
-      - 停止條件：
-          1. after = None（已無更多）
-          2. 連續 EARLY_STOP_PAGES 頁全為已知 URL
-          3. 達到 num_pages 上限
-
-    資料量規模：
-      - 增量爬取（每日）：三個版面 new feed，約數百到數千篇/天
-      - 歷史大量：改用 Arctic Shift API（另建 bulk_load_reddit.py）
-        https://arctic-shift.photon-reddit.com/api/posts/search
-    """
-
-    # EARLY_STOP_PAGES 走 config（ptt / cnyes / reddit 共用）
     from config import EARLY_STOP_EMPTY_PAGES as EARLY_STOP_PAGES
 
     def get_source_info(self) -> dict:
@@ -63,7 +42,7 @@ class RedditScraper(BaseScraper):
 
 
             children = data.get("children", [])
-            after = data.get("after")  # 下一頁 cursor
+            after = data.get("after")
 
             if not children:
                 logging.info("Reddit 無更多貼文，停止")
@@ -93,12 +72,10 @@ class RedditScraper(BaseScraper):
 
 
     def _parse_post(self, post: dict, urls: set) -> Optional[dict]:
-        """解析單篇 Reddit 貼文，回傳標準格式 dict。已知 URL、無效貼文回傳 None。"""
         post_id = post.get("id")
         if not post_id:
             return None
 
-        # Reddit permalink 格式：/r/investing/comments/{id}/{title_slug}/
         permalink = post.get("permalink", "")
         url = f"https://www.reddit.com{permalink}"
 
@@ -108,18 +85,16 @@ class RedditScraper(BaseScraper):
         title   = (post.get("title") or "").strip()
         content = (post.get("selftext") or "").strip()
 
-        # 被刪除的貼文內文為 "[removed]" 或 "[deleted]"
         if content in ("[removed]", "[deleted]"):
             content = ""
 
-        created_utc = post.get("created_utc")# html timestamp欄位
+        created_utc = post.get("created_utc")
         try:
             published_at = self.ts_to_dt(float(created_utc))
         except (ValueError, TypeError):
             logging.warning(f"Reddit 無法解析時間：{created_utc!r}，略過 {url}")
             return None
 
-        # score = Reddit 的 upvote 數，對應 push_count；clamp 在 -100~100
         score = post.get("score", 0) or 0
         push_count = max(-100, min(100, score))
 
@@ -130,7 +105,7 @@ class RedditScraper(BaseScraper):
             "author":       post.get("author"),
             "published_at": published_at,
             "push_count":   push_count,
-            "comments":     [],             # 不爬留言（降低 API 壓力）
+            "comments":     [],
         }
         if not self.validate_article(article, "Reddit"):
             return None

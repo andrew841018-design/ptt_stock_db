@@ -1,11 +1,3 @@
-"""CNN 歷史月份 sitemap 回填爬蟲。
-
-從 2011-12（CNN sitemap 起點）一路跑到當月，與每小時 cnn_scraper 共享 source_id=5。
-- 並行：ThreadPoolExecutor max_workers=5
-- 速率：每篇 1.5s + 0~0.5s jitter
-- 進度恢復：logs/cnn_backfill_progress.json 紀錄已完成月份
-- batch DB 寫入：每 100 篇 commit 一次
-"""
 
 from __future__ import annotations
 
@@ -31,18 +23,16 @@ from config import DEFAULT_HEADERS as _HEADERS
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROGRESS_FILE = _PROJECT_ROOT / "logs" / "cnn_backfill_progress.json"
 
-_START_YEAR_MONTH = (2011, 12)  # CNN sitemap 起點
+_START_YEAR_MONTH = (2011, 12)
 _PARALLEL = 5
-_PER_REQUEST_DELAY = 1.5  # seconds, base
-_PER_REQUEST_JITTER = 0.5  # seconds, additional 0~jitter
+_PER_REQUEST_DELAY = 1.5
+_PER_REQUEST_JITTER = 0.5
 _BATCH_WRITE_SIZE = 100
 
 
 class CnnBackfillScraper(CnnScraper):
-    """繼承 CnnScraper 取得 source 名稱、_fetch_article_full、_save_to_db。"""
 
     def fetch_articles(self) -> list:
-        # 入口由 main() 而非 BaseScraper.run() 呼叫，故此處不實作
         return []
 
 
@@ -178,7 +168,7 @@ def main() -> None:
                     batch.clear()
 
         _flush_batch(scraper, batch, stats)
-        known_urls.update(a["url"] for a in batch)  # 只加成功的 URL
+        known_urls.update(a["url"] for a in batch)
         errors_this_month = stats["errors"] - errors_before
         if errors_this_month == 0:
             done_months.add(ym_key)

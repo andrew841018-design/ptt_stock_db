@@ -11,7 +11,6 @@ load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..'
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "ptt-sentiment-backup")
 
-# pg_dump on host (Homebrew install location; shutil.which fallback for other envs)
 _PG_DUMP_CANDIDATES = ['/opt/homebrew/bin/pg_dump', '/usr/local/bin/pg_dump']
 
 

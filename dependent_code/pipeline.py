@@ -9,10 +9,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from schema import create_schema
-# ── Prometheus metrics（真實接線，非擺設）──────────────────────────────────
-# etl_step_duration_seconds：量每個 step 耗時（label: step name）
-# etl_runs_total：整體 pipeline success / failure 次數
-# articles_scraped_total：每來源累計爬取 article 數（讓 Grafana 看到 rate）
 from metrics import (
     etl_step_duration_seconds,
     etl_runs_total,
@@ -36,7 +32,6 @@ from backup import backup_database
 from ai_model_prediction import run_ai_model_prediction
 from mongo_helper import ensure_indexes
 
-# stream=sys.stdout：logging 寫 stdout，tqdm 保持 stderr，redirect 時乾淨分離
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,9 +44,6 @@ _DEPS_CHECK_INTERVAL = timedelta(days=7)
 
 
 def update_dependencies() -> None:
-    """每週檢查一次非 pin 套件，有新版則自動升級。
-    pin 版本（含 ==）一律跳過，避免破壞已知相容性。
-    """
     if _DEPS_STAMP_PATH.exists():
         last = datetime.fromisoformat(_DEPS_STAMP_PATH.read_text().strip())
         if datetime.utcnow() - last < _DEPS_CHECK_INTERVAL:
@@ -70,8 +62,6 @@ def update_dependencies() -> None:
 
     outdated = {pkg["name"].lower(): pkg["latest_version"] for pkg in json.loads(result.stdout)}
 
-    # 找出 requirements.txt 中無任何版本約束且有新版的套件
-    # ==, <, >, !=, ~=, >= 都跳過，避免破壞已知相容性（例如 numpy<2 保護 torch）
     upgradable = []
     for line in _REQUIREMENTS_PATH.read_text().splitlines():
         stripped = line.strip()
@@ -113,9 +103,6 @@ _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 def _ensure_auth_configured() -> None:
-    """若 auth 金鑰未設定，互動式引導生成並寫入 .env（對應 auth.py 的三個 env var）。
-    非 TTY 環境（launchd / CI）只印 warning，不阻塞 pipeline。
-    """
     import os
     import getpass
     import secrets as _secrets
@@ -157,7 +144,6 @@ def _ensure_auth_configured() -> None:
         print()
         return
 
-    # 讀取現有 .env，更新對應 key，整個寫回
     existing: dict[str, str] = {}
     if _ENV_PATH.exists():
         for line in _ENV_PATH.read_text().splitlines():
@@ -173,71 +159,45 @@ def _ensure_auth_configured() -> None:
     print(f"\n  ✔ 已寫入 {_ENV_PATH}\n")
 
 
-# 新增來源只需在此加入對應 class
 _ARTICLE_SOURCES = [PttScraper, CnyesScraper, RedditScraper, CnnScraper, WsjScraper, MarketWatchScraper]
-_STOCK_SOURCES   = [TwseFetcher, UsStockFetcher]  # 股價類，不繼承 BaseScraper，單獨呼叫
+_STOCK_SOURCES   = [TwseFetcher, UsStockFetcher]
 
 
 def _run_source(scraper_cls) -> str:
-    """執行單一來源，供 ThreadPoolExecutor 呼叫 + Prometheus metric"""
-    name = scraper_cls.__name__ # class name. ex:"PttScraper"
+    name = scraper_cls.__name__
     logging.info(f"[Extract] 開始：{name}")
-    # scraper 內部 run() 回傳 None 但有 self.inserted_count 屬性記本次 insert 數
     scraper = scraper_cls()
     scraper.run()
     inserted = getattr(scraper, "inserted_count", None)
-    # 用 scraper class 推導 source key（小寫去掉 "Scraper" / "Fetcher" 尾巴）
     source_label = name.replace("Scraper", "").replace("Fetcher", "").lower()
     if isinstance(inserted, int) and inserted > 0:
         articles_scraped_total.labels(source=source_label).inc(inserted)
     else:
-        # 沒回傳 count 就 +1 表示本輪跑過（rate_over_time 看得到）
         articles_scraped_total.labels(source=source_label).inc(0)
     return name
 
 
 @contextmanager
 def _step(step_name: str):
-    """timing context manager：寫入 etl_step_duration_seconds histogram"""
     with etl_step_duration_seconds.labels(step=step_name).time():
         yield
 
 
 def extract() -> None:
-    """Extract：並行爬取所有來源（I/O bound，用 thread）
-    Pydantic 驗證在各爬蟲 fetch_articles() 內完成（Transform 第一層）
-    Load（_save_to_db）在各爬蟲 run() 內批次寫入 PostgreSQL
-    """
     all_sources = _ARTICLE_SOURCES + _STOCK_SOURCES
     logging.info(f"[Extract] 並行啟動 {len(all_sources)} 個來源")
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        # dict comprehension：對每個 cls 呼叫 submit()
-        # submit() 把任務丟進 thread pool 立刻回傳 Future object（不等結果）
-        # futures[key]=value.
-        # → key   = Future 物件（代表該 thread 任務）
-        # → value = cls.__name__（來源名稱，供之後 log 用）
-        # 5 個 submit() 幾乎同時發出，5 個 thread 一起跑
         futures = {executor.submit(_run_source, cls): cls.__name__ for cls in all_sources}
-        # as_completed：阻塞等待，誰先跑完誰先 yield 出 key，不照原始順序
         for key in concurrent.futures.as_completed(futures):
             name = futures[key]
             try:
-                key.result() #key=任務，所以要看結果是用key.result()
+                key.result()
                 logging.info(f"[Extract] 完成：{name}")
             except Exception as e:
                 logging.error(f"[Extract] 失敗：{name} — {e}")
 
 
 def transform() -> None:
-    """
-    Transform：QA 資料品質檢查 + 自動修復 + GE 驗證
-
-    流程：
-      1. 跑 QA_checks()
-      2. 若 QA 失敗 → 呼叫 repair()（從 MongoDB raw_responses re-parse 修復 PostgreSQL）
-      3. 修復後重跑 QA（若仍失敗，raise 中止 pipeline）
-      4. GE 驗證（失敗只 warning，不中止）
-    """
     logging.info("[Transform] QA 檢查")
     try:
         QA_checks()
@@ -249,14 +209,14 @@ def transform() -> None:
             result = repair()
         except Exception as repair_err:
             logging.error(f"[Transform] 修復過程出錯：{repair_err}")
-            raise qa_err  # 修復本身出錯 → 拋出原始 QA 錯誤
+            raise qa_err
 
         if result["repaired"] > 0:
             logging.info(f"[Transform] 修復 {result['repaired']} 筆，重跑 QA")
-            QA_checks()  # 修復後重跑，若仍失敗則 raise 中止 pipeline
+            QA_checks()
         else:
             logging.warning("[Transform] 無法修復任何資料（無 raw 或 re-parse 全失敗）")
-            raise qa_err  # 無法修 → 拋出原始 QA 錯誤
+            raise qa_err
 
     logging.info("[Transform] GE 驗證")
     try:
@@ -266,19 +226,15 @@ def transform() -> None:
 
 
 def run_pipeline() -> None:
-    # Auth 金鑰前置檢查：TTY 互動式生成並寫入 .env；非 TTY 只 warning
     _ensure_auth_configured()
 
     try:
-        # Step -1：每週檢查並升級非 pin 套件（失敗不中止 pipeline）
         with _step("deps"):
             try:
                 update_dependencies()
             except Exception as e:
                 logging.warning(f"[Deps] 失敗（不中止 pipeline）：{e}")
 
-        # Step 0：確保 OLTP 表（PostgreSQL）與 MongoDB index 存在（IF NOT EXISTS，幂等）
-        # MongoDB 掛掉時 ensure_indexes 失敗不中止 pipeline——save_raw_response 已有降級
         with _step("schema"):
             create_schema()
             try:
@@ -286,22 +242,18 @@ def run_pipeline() -> None:
             except Exception as e:
                 logging.warning(f"[Mongo] ensure_indexes 失敗（不中止 pipeline）：{e}")
 
-        # Step 1：爬蟲寫入 OLTP
         with _step("extract"):
             extract()
 
-        # Step 2：QA + 自動修復 + GE 驗證
         with _step("transform"):
             transform()
 
-        # Step 3：PII 遮蔽（repair 完再遮蔽，避免 repair 拿到已遮蔽的資料）
         with _step("pii"):
             try:
                 run_pii()
             except Exception as e:
                 logging.warning(f"[PII] 失敗（不中止 pipeline）：{e}")
 
-        # Step 4：BERT 情緒推論（article_labels 夠 + 無 fine-tuned model 時自動先訓練一次）
         with _step("bert"):
             try:
                 if should_finetune():
@@ -312,18 +264,15 @@ def run_pipeline() -> None:
             except Exception as e:
                 logging.warning(f"[BERT] 失敗（不中止 pipeline）：{e}")
 
-        # Step 5：DW ETL（建表 → 填維度 → 填事實 → 刷新 Data Mart）
         with _step("dw_etl"):
             run_etl()
 
-        # Step 6：S3 備份（最後一步，備份完整狀態）
         with _step("backup"):
             try:
                 backup_database()
             except Exception as e:
                 logging.warning(f"[Backup] 失敗（不中止 pipeline）：{e}")
 
-        # Step 7：AI 模型預測（情緒 vs 隔日漲跌，Walk-Forward Validation）
         with _step("ai_predict"):
             try:
                 run_ai_model_prediction("tw")

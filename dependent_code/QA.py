@@ -8,14 +8,12 @@ def QA_checks():
     with get_pg() as conn:
         with conn.cursor() as cursor:
 
-            # ── sources ───────────────────────────────────────────────────
             cursor.execute(f"SELECT COUNT(*) FROM {SOURCES_TABLE}")
             source_count = cursor.fetchone()[0]
             if source_count == 0:
                 raise ValueError("QA FAILED：sources 表是空的")
             logging.info(f"QA PASSED：sources 共 {source_count} 筆")
 
-            # ── articles ──────────────────────────────────────────────────
             cursor.execute(f"SELECT COUNT(*) FROM {ARTICLES_TABLE}")
             article_count = cursor.fetchone()[0]
             if article_count == 0:
@@ -28,7 +26,6 @@ def QA_checks():
                 raise ValueError(f"QA FAILED：發現重複 URL，共 {len(duplicate_urls)} 筆：{duplicate_urls}")
             logging.info("QA PASSED：無重複 URL")
 
-            # 不允許 NULL 的欄位
             for col in ("title", "content", "url", "published_at"):
                 cursor.execute(f"SELECT COUNT(*) FROM {ARTICLES_TABLE} WHERE {col} IS NULL")
                 null_count = cursor.fetchone()[0]
@@ -36,8 +33,6 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：articles.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：articles 必填欄位無 NULL")
 
-            # 來源專屬檢查：has_push_count=True 的來源，push_count 不允許 NULL
-            # （從 config.SOURCES 衍生，新增來源不需改這裡）
             for key, src in SOURCES.items():
                 if not src.get("has_push_count"):
                     continue
@@ -51,7 +46,6 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：{src['name']} 文章 push_count 有 {null_push} 筆 NULL")
                 logging.info(f"QA PASSED：{src['name']} push_count 無 NULL")
 
-            # ── comments ──────────────────────────────────────────────────
             cursor.execute(f"""
                 SELECT COUNT(*) FROM {COMMENTS_TABLE} c
                 WHERE NOT EXISTS (
@@ -70,7 +64,6 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：comments.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：comments 必填欄位無 NULL")
 
-            # ── sentiment_scores ──────────────────────────────────────────
             cursor.execute(f"""
                 SELECT COUNT(*) FROM {SENTIMENT_SCORES_TABLE} ss
                 WHERE NOT EXISTS (
@@ -88,7 +81,6 @@ def QA_checks():
                 raise ValueError(f"QA FAILED：sentiment_scores.score 有 {null_scores} 筆 NULL")
             logging.info("QA PASSED：sentiment_scores 必填欄位無 NULL")
 
-            # ── stock_prices（TW：0050）────────────────────────────────────
             cursor.execute(f"SELECT COUNT(*) FROM {STOCK_PRICES_TABLE}")
             price_count = cursor.fetchone()[0]
             if price_count == 0:
@@ -102,14 +94,12 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：stock_prices.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：stock_prices 必填欄位無 NULL")
 
-            # ── us_stock_prices（US：VOO）─────────────────────────────────
             cursor.execute(f"SELECT COUNT(*) FROM {US_STOCK_PRICES_TABLE}")
             us_price_count = cursor.fetchone()[0]
             if us_price_count == 0:
                 raise ValueError(f"QA FAILED：{US_STOCK_PRICES_TABLE} 表是空的")
             logging.info(f"QA PASSED：us_stock_prices 共 {us_price_count} 筆")
 
-            # trade_date / close：不允許任何 NULL
             for col in ("trade_date", "close"):
                 cursor.execute(f"SELECT COUNT(*) FROM {US_STOCK_PRICES_TABLE} WHERE {col} IS NULL")
                 null_count = cursor.fetchone()[0]
@@ -117,7 +107,6 @@ def QA_checks():
                     raise ValueError(f"QA FAILED：us_stock_prices.{col} 有 {null_count} 筆 NULL")
             logging.info("QA PASSED：us_stock_prices 必填欄位無 NULL")
 
-            # change：第一筆無前一日收盤，允許 NULL，有則 warning
             cursor.execute(f"SELECT COUNT(*) FILTER (WHERE change IS NULL) FROM {US_STOCK_PRICES_TABLE}")
             null_change = cursor.fetchone()[0]
             if null_change > 0:

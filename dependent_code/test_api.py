@@ -9,12 +9,8 @@ from auth import verify_token
 
 client = TestClient(app)
 
-# ── JWT bypass for all tests ──────────────────────────────────────────────────
-# verify_token 是 FastAPI Depends，測試時繞過 DB/JWT，直接回傳固定 dict
 app.dependency_overrides[verify_token] = lambda: {"sub": "testuser", "role": "admin"}
 
-# ===== Mock 資料 =====
-# MOCK_DATA：articles 表格資料（供 /articles/top_push、/articles/search 用）
 MOCK_DATA = pd.DataFrame({
     "Article_id":             [1, 2, 3],
     "Title":                  ["台積電大漲", "聯發科分析", "台積電展望"],
@@ -27,12 +23,9 @@ MOCK_DATA = pd.DataFrame({
 
 MOCK_EMPTY = pd.DataFrame({col: [] for col in MOCK_DATA.columns})
 
-# MOCK_SENTIMENT_ROWS：data_mart.get_daily_sentiment() 的回傳格式（list[dict]）
-# 供 /sentiments/today、/sentiments/change、/sentiments/recent 三個端點用
-# 至少 2 筆才能過 /sentiments/change（需要比較今日 vs 昨日）
 MOCK_SENTIMENT_ROWS = [
-    {"summary_date": datetime.date(2024, 1, 2), "total_articles": 100, "avg_sentiment": 0.5},
-    {"summary_date": datetime.date(2024, 1, 1), "total_articles": 80,  "avg_sentiment": 0.3},
+    {"summary_date": datetime.date(2024, 1, 2), "total_articles": 100, "scored_articles": 100, "avg_sentiment": 0.5},
+    {"summary_date": datetime.date(2024, 1, 1), "total_articles": 80,  "scored_articles": 80,  "avg_sentiment": 0.3},
 ]
 
 STANDARD_CASES = [
@@ -40,17 +33,8 @@ STANDARD_CASES = [
     ("mock_db_empty", [404]),
 ]
 
-# ===== Fixtures =====
 @pytest.fixture
 def mock_db_with_data():
-    """
-    五個 patch 平行生效，同時換掉、同時還原，無階層關係：
-    - get_cache           → None（模擬 MISS，確保走到 DB）
-    - set_cache           → no-op（不實際寫 Redis）
-    - read_sql_query      → MOCK_DATA（load_articles_df 用）
-    - get_pg_pooled       → no-op（不建立真實連線）
-    - get_daily_sentiment → MOCK_SENTIMENT_ROWS（/sentiments/* 端點用，走 data_mart 不走 cache）
-    """
     with patch("api.get_cache", return_value=None), \
          patch("api.set_cache"), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
@@ -67,7 +51,6 @@ def mock_db_empty():
          patch("api.get_daily_sentiment", return_value=[]):
         yield
 
-# ===== Tests =====
 @pytest.mark.parametrize("mock_fixture,expected", [
     ("mock_db_with_data", [200]),
     ("mock_db_empty", [404]),
@@ -91,14 +74,12 @@ def test_get_change_sentiment(mock_fixture, expected, request):
 @pytest.mark.parametrize("mock_fixture,expected", STANDARD_CASES)
 def test_get_recent_sentiment_score(mock_fixture, expected, request):
     request.getfixturevalue(mock_fixture)
-    # correct request
     for period in [PERIOD_MIN, PERIOD_MAX]:
         response = client.get(f"/sentiments/recent?period={period}")
         assert response.status_code in expected, f"period: {period}"
         if response.status_code == 200:
             assert "period" in response.json()
             assert "sentiment_score" in response.json()
-    # incorrect request
     response = client.get(f"/sentiments/recent?period={PERIOD_MIN - 1}")
     assert response.status_code == 422
     response = client.get(f"/sentiments/recent?period={PERIOD_MAX + 1}")
@@ -107,7 +88,6 @@ def test_get_recent_sentiment_score(mock_fixture, expected, request):
 @pytest.mark.parametrize("mock_fixture,expected", STANDARD_CASES)
 def test_get_top_push_articles(mock_fixture, expected, request):
     request.getfixturevalue(mock_fixture)
-    # correct request
     for limit in [ARTICLE_LIMIT_MIN, ARTICLE_LIMIT_MAX]:
         for period in [ARTICLE_PERIOD_MIN, ARTICLE_PERIOD_MAX]:
             response = client.get(f"/articles/top_push?limit={limit}&period={period}")
@@ -115,7 +95,6 @@ def test_get_top_push_articles(mock_fixture, expected, request):
             if response.status_code == 200:
                 assert "limit" in response.json()
                 assert "articles" in response.json()
-    # incorrect request
     response = client.get(f"/articles/top_push?limit={ARTICLE_LIMIT_MIN - 1}")
     assert response.status_code == 422
     response = client.get(f"/articles/top_push?limit={ARTICLE_LIMIT_MAX + 1}")
@@ -128,15 +107,12 @@ def test_get_top_push_articles(mock_fixture, expected, request):
 @pytest.mark.parametrize("mock_fixture,expected", STANDARD_CASES)
 def test_get_search_articles(mock_fixture, expected, request):
     request.getfixturevalue(mock_fixture)
-    # correct request
     response = client.get("/articles/search?keyword=台積電")
     assert response.status_code in expected
     if response.status_code == 200:
         assert response.json()["search_articles"] is not None
-    # empty keyword
     response = client.get("/articles/search?keyword=")
     assert response.status_code in expected
-    # incorrect request
     response = client.get("/articles/search")
     assert response.status_code == 422
 
@@ -146,9 +122,7 @@ def test_health_check():
         assert response.status_code == 200
 
 
-# ===== Cache Helper Tests =====
 def test_set_and_get_cache():
-    """驗證 cache_helper 真的把資料存進 Redis 再取出，且內容正確"""
     from cache_helper import get_cache, set_cache
     df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
     set_cache("test_key", df)
@@ -158,48 +132,29 @@ def test_set_and_get_cache():
     assert list(result["b"]) == ["x", "y", "z"]
 
 
-# ===== Cache-Aside Tests =====
-# 走 Cache-Aside 的端點：/articles/top_push、/articles/search（透過 load_articles_df）
-# /sentiments/* 系列改走 data_mart.get_daily_sentiment，不經過 cache
 def test_cache_hit():
-    """
-    測試目的：Cache HIT 時，get_cache 有被呼叫，get_pg_pooled 不被呼叫
-
-    mock 設定：
-    - api.get_cache       → 回傳 MOCK_DATA（模擬 Redis 有資料）
-    - api.get_pg_pooled   → 空物件（保險用，確保萬一走錯時不會真的連 DB）
-
-    flow:
-    client.get("/articles/top_push")
-    => get_top_push_articles()
-    => load_articles_df()
-    => get_cache() 回傳 MOCK_DATA → 直接 return，get_pg_pooled 不執行
-    """
     with patch("api.get_cache", return_value=MOCK_DATA.copy()) as mock_get, \
          patch("api.get_pg_pooled") as mock_db:
         response = client.get("/articles/top_push")
         assert response.status_code == 200
-        mock_get.assert_called_once()   # Redis 有被查
-        mock_db.assert_not_called()     # DB 完全沒被碰
+        mock_get.assert_called_once()
+        mock_db.assert_not_called()
 
 
 def test_cache_miss():
-    """Cache MISS：Redis 沒資料 → 查 DB → 存進 Redis"""
     with patch("api.get_cache", return_value=None) as mock_get, \
          patch("api.set_cache") as mock_set, \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
          patch("api.get_pg_pooled"):
         response = client.get("/articles/top_push")
         assert response.status_code == 200
-        mock_get.assert_called_once()   # Redis 有被查（但 MISS）
-        mock_set.assert_called_once()   # 查完 DB 後有存進 Redis
+        mock_get.assert_called_once()
+        mock_set.assert_called_once()
 
-#平常應該不會出錯，這個只用來偵測Redis掛掉時，API是否不會爆錯
 def test_cache_redis_down():
-    """Redis 掛掉：cache_helper 內部 catch 錯誤回傳 None，fallback 查 DB，API 不爆"""
     with patch("cache_helper._redis.get", side_effect=redis.RedisError("Redis 掛了")), \
          patch("cache_helper._redis.setex", side_effect=redis.RedisError("Redis 掛了")), \
          patch("api.pd.read_sql_query", return_value=MOCK_DATA.copy()), \
          patch("api.get_pg_pooled"):
         response = client.get("/articles/top_push")
-        assert response.status_code == 200  # API 正常回傳，沒有爆
+        assert response.status_code == 200

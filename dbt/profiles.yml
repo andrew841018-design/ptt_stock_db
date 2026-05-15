@@ -1,7 +1,6 @@
 ptt_sentiment:
   target: dev
   outputs:
-    # 本機 PostgreSQL（OLTP + 自建 DW）
     dev:
       type: postgres
       host: "{{ env_var('PG_HOST', 'localhost') }}"
@@ -12,7 +11,6 @@ ptt_sentiment:
       schema: public
       threads: 4
 
-    # Google BigQuery — 雲端 DW
     bigquery:
       type: bigquery
       method: service-account

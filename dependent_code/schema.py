@@ -1,6 +1,3 @@
-"""
-PostgreSQL Schema 建立腳本
-"""
 
 import os
 import logging
@@ -13,7 +10,6 @@ load_dotenv(os.path.join(_base, '.env')) or load_dotenv(os.path.join(_base, '..'
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ─── DDL：建表語法 ─────────────────────────────────────────────────────────────
 CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id   SERIAL PRIMARY KEY,
@@ -90,10 +86,43 @@ CREATE TABLE IF NOT EXISTS ai_model_prediction_runs (
 );
 """
 
-# ─── DDL：建 Index ─────────────────────────────────────────────────────────────
+
+CREATE_RAW_TABLES = """
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS raw_articles (
+    raw_id        BIGSERIAL    PRIMARY KEY,
+    source_name   TEXT         NOT NULL,
+    raw_payload   JSONB        NOT NULL,
+    ingested_at   TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+CREATE TABLE IF NOT EXISTS raw_sentiment_scores (
+    raw_id           BIGSERIAL    PRIMARY KEY,
+    article_id_raw   TEXT,
+    raw_payload      JSONB        NOT NULL,
+    ingested_at      TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+CREATE TABLE IF NOT EXISTS raw_sources (
+    raw_id        BIGSERIAL    PRIMARY KEY,
+    source_name   TEXT         NOT NULL,
+    raw_payload   JSONB        NOT NULL,
+    ingested_at   TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+"""
+
+CREATE_RAW_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_raw_articles_source_name ON raw_articles(source_name);
+CREATE INDEX IF NOT EXISTS idx_raw_articles_ingested_at ON raw_articles(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_raw_articles_url ON raw_articles((raw_payload->>'url'));
+CREATE INDEX IF NOT EXISTS idx_raw_sent_article_id_raw ON raw_sentiment_scores(article_id_raw);
+CREATE INDEX IF NOT EXISTS idx_raw_sent_ingested_at ON raw_sentiment_scores(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_raw_sources_source_name ON raw_sources(source_name);
+"""
+
 CREATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_articles_published_at    ON articles(published_at);
 CREATE INDEX IF NOT EXISTS idx_articles_source_id       ON articles(source_id);
+-- scraped_at index for hourly health monitor 24h window query (codex R2-2 2026-05-10)
+CREATE INDEX IF NOT EXISTS idx_articles_scraped_at      ON articles(scraped_at);
 CREATE INDEX IF NOT EXISTS idx_comments_article_id      ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_sentiment_article_id     ON sentiment_scores(article_id);
 CREATE INDEX IF NOT EXISTS idx_stock_prices_trade_date  ON stock_prices(trade_date);
@@ -140,7 +169,6 @@ REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM {api_user};
 
 
 def create_schema() -> None:
-    """建立 PostgreSQL 所有資料表、Index 與角色權限"""
     conn = None
     try:
         conn = psycopg2.connect(**PG_ADMIN_CONFIG)
@@ -155,12 +183,15 @@ def create_schema() -> None:
             logging.info("%s table created (or already exists)", AI_MODEL_PREDICTION_RUNS_TABLE)
             cur.execute(CREATE_INDEXES)
             logging.info("Indexes created (or already exist)")
+            cur.execute(CREATE_RAW_TABLES)
+            logging.info("Raw EL+T tables created (or already exist)")
+            cur.execute(CREATE_RAW_INDEXES)
+            logging.info("Raw EL+T indexes created (or already exist)")
 
-            # 建立 DB 角色（GRANT / REVOKE）
             api_user = os.environ.get("PG_API_USER",      "api_user")
             api_pw   = os.environ.get("PG_API_PASSWORD",  "api_readonly_2026")
-            etl_user = os.environ.get("PG_ETL_USER",      "etl_user")
-            etl_pw   = os.environ.get("PG_ETL_PASSWORD",  "etl_write_2026")
+            etl_user = os.environ.get("PG_USER",          os.environ.get("PG_ETL_USER", "etl_user"))
+            etl_pw   = os.environ.get("PG_PASSWORD",      os.environ.get("PG_ETL_PASSWORD", "etl_write_2026"))
             dbname   = os.environ.get("PG_DBNAME",      "ptt_stock")
 
             cur.execute(CREATE_ROLES.format(

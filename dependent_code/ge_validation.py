@@ -30,12 +30,10 @@ def ge_validate():
             JOIN {SOURCES_TABLE} s ON s.source_id = a.source_id
         """, conn)
 
-    # ── 全來源共用檢查 ─────────────────────────────────────────────────────────
     ge_all = PandasDataset(df)
     _log_result(ge_all.expect_column_values_to_not_be_null('Title'))
     _log_result(ge_all.expect_column_values_to_not_be_null('Url'))
 
-    # ── 各來源動態檢查（從 config.SOURCES 衍生，新增來源不需改這裡）──────────
     for key, src in SOURCES.items():
         name = src["name"]
         src_df = df[df['Source'] == name]
@@ -46,20 +44,14 @@ def ge_validate():
 
         ge_src = PandasDataset(src_df)
 
-        # URL 格式檢查（只在 config 有設定 url_pattern 時執行）
-        # GE 0.18.19 的 expect_column_values_to_match_regex 底層用 re.match（anchor 在字串開頭），
-        # 但 config 的 url_pattern 是「URL 中某段子字串」語意（search），URL 開頭是 https://... 會 FAIL，
-        # 所以補 .* 前綴讓 re.match 能從任意位置開始比對
         url_pattern = src.get("url_pattern")
         if url_pattern:
             _log_result(ge_src.expect_column_values_to_match_regex('Url', f".*{url_pattern}"))
 
-        # push_count 檢查（只對有推文數的來源執行）
         if src.get("has_push_count"):
             _log_result(ge_src.expect_column_values_to_not_be_null('Push_count'))
             _log_result(ge_src.expect_column_values_to_be_between('Push_count', -100, 100))
 
-    # ── us_stock_prices 檢查 ───────────────────────────────────────────────────
     with get_pg() as conn:
         us_df = pd.read_sql_query(
             f"SELECT trade_date, close, change FROM {US_STOCK_PRICES_TABLE}", conn)

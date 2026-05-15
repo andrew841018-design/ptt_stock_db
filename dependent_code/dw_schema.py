@@ -1,27 +1,3 @@
-"""
-Data Warehouse Schema（Star Schema + Snowflake 延伸）
-
-Star Schema（核心）：
-  fact_sentiment → dim_source / dim_stock
-
-Snowflake 延伸（dim_source 多一層正規化）：
-  dim_source → dim_market（TW / US 市場）
-  好處：可直接按市場聚合，不需知道個別來源名稱
-  代價：查詢需多一個 JOIN（dim_source JOIN dim_market）
-
-- dim_market  : 市場維度（Snowflake 新增）
-- dim_source  : 來源維度（FK → dim_market）
-- dim_stock   : 股票維度（追蹤標的：0050、VOO）
-- fact_sentiment : 每日每來源情緒聚合事實表
-  └ source_name 直接 denormalize 進 fact（DW 讀多寫少，避免 JOIN）
-
-Data Mart（獨立 table，ETL TRUNCATE+INSERT 更新）：
-- mart_daily_summary : 每日情緒摘要（儀表板用，source 粒度）
-
-Materialized View（PostgreSQL 特有，REFRESH MATERIALIZED VIEW 更新）：
-- mv_market_summary  : 市場層級聚合（TW vs US），示範 Snowflake 三表 JOIN
-  └ 與 Data Mart 互補：Mart 是 source 粒度，MV 是 market 粒度
-"""
 
 import logging
 import psycopg2
@@ -29,9 +5,7 @@ from config import PG_ADMIN_CONFIG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ─── Dimension Tables ──────────────────────────────────────────────────────────
 
-# Snowflake 延伸：dim_market 是 dim_source 的上層維度
 CREATE_DIM_MARKET = """
 CREATE TABLE IF NOT EXISTS dim_market (
     market_id   SERIAL      PRIMARY KEY,
@@ -60,23 +34,22 @@ CREATE TABLE IF NOT EXISTS dim_stock (
 );
 """
 
-# ─── Fact Table ────────────────────────────────────────────────────────────────
 
 CREATE_FACT_SENTIMENT = """
 CREATE TABLE IF NOT EXISTS fact_sentiment (
-    fact_id         SERIAL       PRIMARY KEY,
-    fact_date       DATE         NOT NULL,
-    source_id       INTEGER      NOT NULL REFERENCES dim_source(source_id),
-    stock_symbol    VARCHAR(20),                     -- denormalized，直接存代號（0050 / VOO）
-    source_name     VARCHAR(100) NOT NULL,           -- denormalized，避免查詢時 JOIN dim_source
-    article_count   INTEGER      NOT NULL,
-    avg_sentiment   NUMERIC(6,4),
-    avg_push_count  NUMERIC(8,2),
+    fact_id          SERIAL       PRIMARY KEY,
+    fact_date        DATE         NOT NULL,
+    source_id        INTEGER      NOT NULL REFERENCES dim_source(source_id),
+    stock_symbol     VARCHAR(20),                     -- denormalized，直接存代號（0050 / VOO）
+    source_name      VARCHAR(100) NOT NULL,           -- denormalized，避免查詢時 JOIN dim_source
+    article_count    INTEGER      NOT NULL,           -- 該 (date, source) 總文章數（含未 scored，dashboard 直觀顯示）
+    scored_articles  INTEGER      NOT NULL DEFAULT 0, -- 已被 BERT scored 的文章數，用於加權平均（避免 wayback BERT 落後期間 article_count 失真）
+    avg_sentiment    NUMERIC(6,4),
+    avg_push_count   NUMERIC(8,2),
     UNIQUE (fact_date, source_id)
 );
 """
 
-# ─── Indexes ───────────────────────────────────────────────────────────────────
 
 CREATE_DW_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_fact_date      ON fact_sentiment(fact_date);
@@ -84,20 +57,15 @@ CREATE INDEX IF NOT EXISTS idx_fact_source    ON fact_sentiment(source_id);
 """
 
 
-# ─── Data Mart Tables ──────────────────────────────────────────────────────────
-# Data Mart = DW 的子集，針對特定用途預先彙整，讓儀表板 / API 直接查表，
-# 不用每次去掃 fact_sentiment + JOIN dim_date（大表的 aggregation 非常慢）。
-# 與 Materialized View 差異：
-#   MV：PostgreSQL 特有，由 REFRESH MATERIALIZED VIEW 更新
-#   Mart：標準 table，由 ETL INSERT/TRUNCATE+INSERT 更新，可跨 DB 移植
 
 CREATE_MART_DAILY_SUMMARY = """
 CREATE TABLE IF NOT EXISTS mart_daily_summary (
-    summary_date  DATE         NOT NULL,
-    source_name   VARCHAR(100) NOT NULL,
-    total_articles INTEGER     NOT NULL DEFAULT 0,
-    avg_sentiment  NUMERIC(6,4),
-    avg_push_count NUMERIC(8,2),
+    summary_date    DATE         NOT NULL,
+    source_name     VARCHAR(100) NOT NULL,
+    total_articles  INTEGER      NOT NULL DEFAULT 0,  -- dashboard 顯示「篇數」
+    scored_articles INTEGER      NOT NULL DEFAULT 0,  -- 加權平均的真實 weight
+    avg_sentiment   NUMERIC(6,4),
+    avg_push_count  NUMERIC(8,2),
     PRIMARY KEY (summary_date, source_name)
 );
 """
@@ -108,48 +76,34 @@ CREATE INDEX IF NOT EXISTS idx_mart_daily_date
 """
 
 
-# ─── Materialized View ─────────────────────────────────────────────────────────
-# mv_market_summary：市場層級聚合（TW vs US）
-#   - 展示 Snowflake schema 三表 JOIN（fact → dim_source → dim_market）
-#   - 與 Data Mart 互補：Mart 是 source 粒度，MV 是 market 粒度
-#   - CREATE 時自動填入資料；後續由 dw_etl.py 的 REFRESH MATERIALIZED VIEW 更新
 
-CREATE_MV_MARKET_SUMMARY = """
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_market_summary AS
-SELECT
-    fs.fact_date,
-    dm.market_code,
-    COUNT(DISTINCT ds.source_id)  AS source_count,
-    SUM(fs.article_count)         AS total_articles,
-    AVG(fs.avg_sentiment)         AS avg_sentiment,
-    AVG(fs.avg_push_count)        AS avg_push_count
-FROM fact_sentiment fs
-JOIN dim_source ds ON ds.source_id = fs.source_id
-JOIN dim_market dm ON dm.market_id = ds.market_id
-GROUP BY fs.fact_date, dm.market_code
-WITH NO DATA;
+CREATE_MART_MARKET_SUMMARY = """
+CREATE TABLE IF NOT EXISTS mart_market_summary (
+    fact_date       DATE NOT NULL,
+    market_code     VARCHAR(10) NOT NULL,
+    source_count    INTEGER,
+    total_articles  BIGINT,                           -- dashboard 顯示「篇數」
+    scored_articles BIGINT,                           -- 加權平均的真實 weight
+    avg_sentiment   NUMERIC(5,4),
+    avg_push_count  NUMERIC(8,2),
+    PRIMARY KEY (fact_date, market_code)
+);
 """
 
-# REFRESH 前需要 UNIQUE index 才能用 CONCURRENTLY（目前先不用，但索引保留讓查詢更快）
-CREATE_MV_INDEXES = """
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_market_summary_unique
-    ON mv_market_summary(fact_date, market_code);
+CREATE_MART_MARKET_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_mart_market_date
+    ON mart_market_summary(fact_date);
 """
 
 
-# Stored Procedures / Functions 定義在 scripts/init_marts.sql，
-# 由 data_mart.ensure_sp_schema() 統一套用。
 
 
 def create_dw_schema() -> None:
-    """建立 DW 所有資料表、Index 和 Materialized View"""
     conn = None
     try:
         conn = psycopg2.connect(**PG_ADMIN_CONFIG)
         with conn.cursor() as cur:
             cur.execute(CREATE_DIM_MARKET)
-            # 幂等補欄位：dim_market 早期版本只有 market_id + market_code，
-            # 2026-04-15 起 INSERT 寫 4 欄（market_code/market_name/currency/timezone）。
             cur.execute("""
                 ALTER TABLE dim_market
                 ADD COLUMN IF NOT EXISTS market_name VARCHAR(50) NOT NULL DEFAULT '',
@@ -158,7 +112,6 @@ def create_dw_schema() -> None:
             """)
             logging.info("dim_market created (or already exists)")
             cur.execute(CREATE_DIM_SOURCE)
-            # 幂等補欄位：dim_source 已存在時加入 market_id FK
             cur.execute("""
                 ALTER TABLE dim_source
                 ADD COLUMN IF NOT EXISTS market_id INTEGER REFERENCES dim_market(market_id)
@@ -166,7 +119,6 @@ def create_dw_schema() -> None:
             logging.info("dim_source created (or already exists)")
             cur.execute(CREATE_DIM_STOCK)
             logging.info("dim_stock created (or already exists)")
-            # Migration: drop fact_sentiment if it has old schema (avg_score instead of avg_sentiment)
             cur.execute("""
                 DO $$
                 BEGIN
@@ -178,11 +130,13 @@ def create_dw_schema() -> None:
                 END $$;
             """)
             cur.execute(CREATE_FACT_SENTIMENT)
+            cur.execute("""
+                ALTER TABLE fact_sentiment
+                ADD COLUMN IF NOT EXISTS scored_articles INTEGER NOT NULL DEFAULT 0
+            """)
             logging.info("fact_sentiment created (or already exists)")
             cur.execute(CREATE_DW_INDEXES)
             logging.info("DW indexes created (or already exist)")
-            # Data Mart tables
-            # Migration: drop mart_daily_summary if schema is missing summary_date
             cur.execute("""
                 DO $$
                 BEGIN
@@ -196,18 +150,26 @@ def create_dw_schema() -> None:
                 END $$;
             """)
             cur.execute(CREATE_MART_DAILY_SUMMARY)
+            cur.execute("""
+                ALTER TABLE mart_daily_summary
+                ADD COLUMN IF NOT EXISTS total_articles INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS scored_articles INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS avg_sentiment NUMERIC(6,4),
+                ADD COLUMN IF NOT EXISTS avg_push_count NUMERIC(8,2)
+            """)
             logging.info("mart_daily_summary created (or already exists)")
             cur.execute(CREATE_MART_INDEXES)
             logging.info("Data Mart indexes created (or already exist)")
-            # Materialized View（Snowflake 三表 JOIN 的市場層級聚合）
-            cur.execute(CREATE_MV_MARKET_SUMMARY)
-            logging.info("mv_market_summary created (or already exists)")
-            cur.execute(CREATE_MV_INDEXES)
-            logging.info("MV indexes created (or already exist)")
-            # Stored Procedures / Functions 由 data_mart.ensure_sp_schema() 管理
-            # （定義在 scripts/init_marts.sql），此處不再 execute。
+            cur.execute("DROP MATERIALIZED VIEW IF EXISTS mv_market_summary CASCADE")
+            cur.execute(CREATE_MART_MARKET_SUMMARY)
+            cur.execute("""
+                ALTER TABLE mart_market_summary
+                ADD COLUMN IF NOT EXISTS scored_articles BIGINT
+            """)
+            logging.info("mart_market_summary created (or already exists)")
+            cur.execute(CREATE_MART_MARKET_INDEXES)
+            logging.info("mart_market_summary indexes created (or already exist)")
 
-            # Migration：補上後來新增的欄位（IF NOT EXISTS 幂等，舊 DB 不會報錯）
             cur.execute("""
                 ALTER TABLE dim_source
                 ADD COLUMN IF NOT EXISTS tracked_stock VARCHAR(20)

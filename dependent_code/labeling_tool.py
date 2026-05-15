@@ -1,16 +1,3 @@
-"""
-文章情緒標注工具（Streamlit）
-
-用途：人工標注文章情緒，供 BERT fine-tuning 使用
-標注規則：
-  positive（正面）— 看好後市、利多消息、樂觀情緒
-  neutral （中性）— 無明確立場、純資訊、觀望態度
-  negative（負面）— 看壞後市、利空消息、悲觀情緒
-
-執行方式：
-  cd dependent_code
-  streamlit run labeling_tool.py
-"""
 
 import sys
 import os
@@ -21,21 +8,17 @@ import streamlit as st
 from pg_helper import get_pg
 from config import ARTICLES_TABLE, ARTICLE_LABELS_TABLE, sources_by_lang
 
-# ── 常數 ──────────────────────────────────────────────────────────────────────
 
 TARGET_COUNT   = 500
 LABELS         = ["positive", "neutral", "negative"]
 LABEL_DISPLAY  = {"positive": "✅ 正面", "neutral": "⚪ 中性", "negative": "❌ 負面"}
 LABEL_COLORS   = {"positive": "green",   "neutral": "gray",   "negative": "red"}
 
-# 中文來源（對比 0050）、英文來源（對比 VOO）
 ZH_SOURCES = sources_by_lang("zh")
 EN_SOURCES = sources_by_lang("en")
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _load_progress() -> dict:
-    """回傳各 label 數量與總數"""
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"SELECT label, COUNT(*) FROM {ARTICLE_LABELS_TABLE} GROUP BY label")
@@ -44,7 +27,6 @@ def _load_progress() -> dict:
 
 
 def _load_next_article(lang: str) -> Optional[dict]:
-    """抓一篇尚未標注的文章（依語言過濾）"""
     source_names = ZH_SOURCES if lang == "zh" else EN_SOURCES
     with get_pg() as conn:
         with conn.cursor() as cur:
@@ -72,7 +54,6 @@ def _load_next_article(lang: str) -> Optional[dict]:
 
 
 def _save_label(article_id: int, label: str) -> None:
-    """儲存標注結果到 DB"""
     with get_pg() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -82,12 +63,10 @@ def _save_label(article_id: int, label: str) -> None:
             """, (article_id, label))
 
 
-# ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="情緒標注工具", layout="wide")
 st.title("📝 文章情緒標注工具")
 
-# 語言切換（顯示動態取自 SOURCES，避免新增來源後 label 不同步）
 _zh_label = "、".join(ZH_SOURCES) or "（無）"
 _en_label = "、".join(EN_SOURCES) or "（無）"
 lang = st.sidebar.radio("標注語言", ["zh", "en"],
@@ -95,7 +74,6 @@ lang = st.sidebar.radio("標注語言", ["zh", "en"],
 compare_stock = "0050（元大台灣50）" if lang == "zh" else "VOO（Vanguard S&P 500）"
 st.sidebar.markdown(f"**對比標的**：{compare_stock}")
 
-# 進度
 progress = _load_progress()
 total_labeled = sum(progress.values())
 st.sidebar.markdown("---")
@@ -116,7 +94,6 @@ st.sidebar.markdown("""
 - ❌ **負面**：看壞後市、利空、悲觀
 """)
 
-# 載入文章（session state 避免重複載入）
 if "article" not in st.session_state or st.session_state.get("lang") != lang:
     st.session_state.article = _load_next_article(lang)
     st.session_state.lang = lang
@@ -127,7 +104,6 @@ if article is None:
     st.info(f"{'中文' if lang == 'zh' else '英文'}文章已全部標注完畢！")
     st.stop()
 
-# 文章顯示
 st.markdown(f"**來源**：{article['source_name']}　**發布時間**：{article['published_at'].date() if article['published_at'] else '—'}")
 st.markdown(f"## {article['title']}")
 
@@ -139,7 +115,6 @@ else:
 
 st.markdown("---")
 
-# 標注按鈕
 col1, col2, col3 = st.columns(3)
 
 def _on_label(label: str):
